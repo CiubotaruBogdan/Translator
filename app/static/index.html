@@ -1,0 +1,1407 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Traducător Offline</title>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#f8fafc;--bg2:#fff;--bg3:#f1f5f9;--border:#e2e8f0;
+  --text:#0f172a;--text2:#475569;--text3:#94a3b8;
+  --primary:#2563eb;--primary-h:#1d4ed8;--primary-l:#dbeafe;
+  --green:#16a34a;--green-l:#dcfce7;
+  --red:#dc2626;--red-l:#fee2e2;
+  --amber:#d97706;--amber-l:#fef3c7;
+  --purple:#7c3aed;--purple-l:#ede9fe;
+  --radius:10px;--shadow:0 1px 3px rgba(0,0,0,.08);
+}
+[data-theme="dark"]{
+  --bg:#0f172a;--bg2:#1e293b;--bg3:#334155;--border:#475569;
+  --text:#f1f5f9;--text2:#94a3b8;--text3:#64748b;
+  --primary:#3b82f6;--primary-h:#60a5fa;--primary-l:#1e3a5f;
+  --green:#22c55e;--green-l:#14532d;
+  --red:#ef4444;--red-l:#450a0a;
+  --amber:#f59e0b;--amber-l:#451a03;
+  --purple:#a78bfa;--purple-l:#2e1065;
+  --shadow:0 1px 3px rgba(0,0,0,.3);
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:var(--primary);text-decoration:none}
+
+/* Layout */
+.app{display:flex;min-height:100vh}
+.sidebar{width:260px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-header{padding:20px;border-bottom:1px solid var(--border)}
+.sidebar-header h1{font-size:18px;font-weight:700;color:var(--primary)}
+.sidebar-header p{font-size:11px;color:var(--text3);margin-top:2px}
+.sidebar-nav{flex:1;padding:12px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:500;color:var(--text2);transition:.15s}
+.nav-item:hover{background:var(--bg3);color:var(--text)}
+.nav-item.active{background:var(--primary-l);color:var(--primary);font-weight:600}
+.nav-item svg{width:18px;height:18px;fill:currentColor;flex-shrink:0}
+.nav-badge{margin-left:auto;background:var(--primary);color:#fff;font-size:11px;padding:1px 7px;border-radius:10px;font-weight:600}
+.sidebar-footer{padding:16px 20px;border-top:1px solid var(--border);font-size:12px;color:var(--text3)}
+
+.content{flex:1;overflow-y:auto;padding:24px;max-height:100vh}
+
+/* Cards */
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);margin-bottom:16px}
+.card-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.card-title{font-size:14px;font-weight:600;color:var(--text)}
+.card-body{padding:18px}
+
+/* Stats row */
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px}
+.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow)}
+.stat-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);margin-bottom:4px}
+.stat-value{font-size:24px;font-weight:700;color:var(--text)}
+.stat-sub{font-size:12px;color:var(--text2);margin-top:2px}
+.stat-icon{width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;margin-bottom:8px}
+.stat-icon svg{width:20px;height:20px;fill:#fff}
+.stat-icon.blue{background:var(--primary)}
+.stat-icon.green{background:var(--green)}
+.stat-icon.amber{background:var(--amber)}
+.stat-icon.purple{background:var(--purple)}
+.stat-icon.red{background:var(--red)}
+
+/* Meter bar */
+.meter{height:6px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-top:8px}
+.meter-fill{height:100%;border-radius:3px;transition:width .5s}
+.meter-fill.blue{background:var(--primary)}
+.meter-fill.green{background:var(--green)}
+.meter-fill.amber{background:var(--amber)}
+.meter-fill.red{background:var(--red)}
+
+/* Status badges */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600}
+.badge.green{background:var(--green-l);color:var(--green)}
+.badge.red{background:var(--red-l);color:var(--red)}
+.badge.amber{background:var(--amber-l);color:var(--amber)}
+.badge.blue{background:var(--primary-l);color:var(--primary)}
+.badge.purple{background:var(--purple-l);color:var(--purple)}
+.badge-dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+
+/* Forms */
+.form-group{margin-bottom:14px}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px}
+.form-control{width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);transition:.15s}
+.form-control:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M2 4l4 4 4-4z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+.form-row{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:end}
+.form-hint{font-size:11px;color:var(--text3);margin-top:3px}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:10px 20px;font-size:14px;font-weight:600;border:none;border-radius:8px;cursor:pointer;transition:.15s}
+.btn svg{width:16px;height:16px;fill:currentColor}
+.btn-primary{background:var(--primary);color:#fff}
+.btn-primary:hover{background:var(--primary-h)}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.btn-secondary{background:var(--bg3);color:var(--text2);border:1px solid var(--border)}
+.btn-secondary:hover{background:var(--border)}
+.btn-danger{background:var(--red);color:#fff}
+.btn-sm{padding:6px 12px;font-size:12px}
+.btn-icon{background:none;border:1px solid var(--border);border-radius:8px;padding:8px;cursor:pointer;color:var(--text2);display:flex;align-items:center}
+.btn-icon:hover{background:var(--bg3)}
+.btn-icon svg{width:16px;height:16px;fill:currentColor}
+
+/* Upload zone */
+.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:40px;text-align:center;cursor:pointer;transition:.2s}
+.upload-zone:hover,.upload-zone.dragover{border-color:var(--primary);background:var(--primary-l)}
+.upload-zone svg{width:40px;height:40px;fill:var(--text3);margin-bottom:8px}
+.upload-zone p{color:var(--text2);font-size:14px}
+.upload-zone .hint{font-size:12px;color:var(--text3);margin-top:4px}
+
+/* File list */
+.file-list{margin-top:12px}
+.file-item{display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--bg3);border-radius:8px;margin-bottom:6px}
+.file-item svg{width:28px;height:28px;fill:var(--primary);flex-shrink:0}
+.file-item-info{flex:1;min-width:0}
+.file-item-name{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-item-size{font-size:11px;color:var(--text3)}
+.file-item-remove{background:none;border:none;cursor:pointer;color:var(--text3);padding:4px;border-radius:4px;display:flex}
+.file-item-remove:hover{background:var(--red-l);color:var(--red)}
+.file-item-remove svg{width:16px;height:16px;fill:currentColor}
+
+/* Job list */
+.job-item{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px;transition:.1s}
+.job-item:last-child{border-bottom:none}
+.job-item:hover{background:var(--bg3)}
+.job-info{flex:1;min-width:0}
+.job-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.job-meta{font-size:12px;color:var(--text3);margin-top:2px}
+.job-progress{width:120px;flex-shrink:0}
+.job-actions{display:flex;gap:4px}
+
+/* Progress bar */
+.progress{height:8px;background:var(--bg3);border-radius:4px;overflow:hidden}
+.progress-fill{height:100%;border-radius:4px;transition:width .3s;background:var(--primary)}
+.progress-fill.done{background:var(--green)}
+.progress-fill.error{background:var(--red)}
+
+/* Event log */
+.event-log{max-height:300px;overflow-y:auto;font-family:'Cascadia Code','Fira Code',monospace;font-size:12px;line-height:1.8}
+.event-line{display:flex;gap:8px;padding:2px 0}
+.event-time{color:var(--text3);flex-shrink:0;width:60px}
+.event-type{flex-shrink:0;width:14px;text-align:center}
+.event-type.success{color:var(--green)}
+.event-type.error{color:var(--red)}
+.event-type.warning{color:var(--amber)}
+.event-type.info{color:var(--primary)}
+.event-msg{color:var(--text2);word-break:break-word}
+
+/* Page sections */
+.page{display:none}
+.page.active{display:block}
+.page-title{font-size:20px;font-weight:700;margin-bottom:16px}
+
+/* Swap button */
+.swap-btn{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;align-self:end;margin-bottom:1px}
+.swap-btn:hover{background:var(--primary-l);border-color:var(--primary)}
+.swap-btn svg{width:18px;height:18px;fill:var(--text2)}
+
+/* Spinner */
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner-dark{border-color:var(--border);border-top-color:var(--primary)}
+
+/* Clients list */
+.client-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px}
+.client-row:last-child{border-bottom:none}
+.client-dot{width:8px;height:8px;border-radius:50%;background:var(--green);flex-shrink:0}
+
+/* Responsive */
+@media(max-width:768px){
+  .sidebar{display:none}
+  .mobile-header{display:flex !important}
+  .stats-row{grid-template-columns:1fr 1fr}
+  .form-row{grid-template-columns:1fr}
+  .swap-btn{transform:rotate(90deg);justify-self:center}
+}
+.mobile-header{display:none;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--bg2);border-bottom:1px solid var(--border)}
+.mobile-header h1{font-size:16px;font-weight:700;color:var(--primary)}
+
+/* Toast — top right */
+.toast-container{position:fixed;top:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:8px}
+.toast{padding:12px 18px;border-radius:8px;font-size:13px;font-weight:500;box-shadow:0 4px 12px rgba(0,0,0,.15);transform:translateX(120%);transition:.3s;color:#fff;max-width:400px}
+.toast.show{transform:translateX(0)}
+.toast.success{background:var(--green)}
+.toast.error{background:var(--red)}
+.toast.info{background:var(--primary)}
+
+/* Modal */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+.modal-overlay.active{display:flex}
+.modal{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:24px;max-width:500px;width:90%;box-shadow:0 10px 25px rgba(0,0,0,.2)}
+.modal h3{font-size:16px;font-weight:700;margin-bottom:16px}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+
+/* Pulse animation */
+@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.4}}
+.pulse{animation:pulse-dot 1.5s infinite}
+
+/* Table */
+.table-simple{width:100%;font-size:13px;border-collapse:collapse}
+.table-simple th{text-align:left;padding:8px 12px;border-bottom:2px solid var(--border);font-weight:600;color:var(--text2);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+.table-simple td{padding:8px 12px;border-bottom:1px solid var(--border)}
+
+/* Active jobs panel */
+.active-jobs-panel{margin-top:16px}
+.active-job-card{margin-bottom:12px}
+
+/* Log entries */
+.log-entry{display:flex;gap:8px;padding:3px 6px;border-bottom:1px solid var(--border);line-height:1.5}
+.log-entry:hover{background:var(--bg3)}
+.log-time{color:var(--text3);white-space:nowrap;min-width:130px}
+.log-level{font-weight:700;min-width:60px;text-transform:uppercase}
+.log-level.INFO{color:var(--primary)}
+.log-level.WARNING{color:var(--amber)}
+.log-level.ERROR{color:var(--red)}
+.log-level.DEBUG{color:var(--text3)}
+.log-source{color:var(--purple);min-width:80px}
+.log-msg{color:var(--text);word-break:break-all}
+
+/* File entries */
+.file-entry{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border);font-size:13px}
+.file-entry:last-child{border-bottom:none}
+.file-entry:hover{background:var(--bg3)}
+.file-category{font-size:11px;font-weight:600;text-transform:uppercase;padding:2px 8px;border-radius:4px}
+.file-category.upload{background:var(--primary-l);color:var(--primary)}
+.file-category.output{background:var(--green-l);color:var(--green)}
+
+/* Btn danger */
+.btn-danger{background:var(--red);color:#fff;border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:6px;transition:.15s}
+.btn-danger:hover{opacity:.85}
+.btn-sm.btn-danger{padding:4px 10px;font-size:12px}
+</style>
+</head>
+<body>
+
+<!-- Mobile Header -->
+<div class="mobile-header">
+  <h1>Traducător Offline</h1>
+  <button class="btn-icon" onclick="document.querySelector('.sidebar').classList.toggle('show')" style="display:flex">
+    <svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+  </button>
+</div>
+
+<div class="app">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h1>Traducător Offline</h1>
+
+    </div>
+    <div class="sidebar-nav">
+      <div class="nav-item active" data-page="translate" onclick="showPage('translate')">
+        <svg viewBox="0 0 24 24"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
+        Traducere nouă
+      </div>
+      <div class="nav-item" data-page="jobs" onclick="showPage('jobs')">
+        <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM7 10h2v7H7zm4-3h2v10h-2zm4 6h2v4h-2z"/></svg>
+        Job-uri
+        <span class="nav-badge" id="jobsBadge" style="display:none">0</span>
+      </div>
+      <div class="nav-item" data-page="dashboard" onclick="showPage('dashboard')">
+        <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+        Dashboard
+      </div>
+      <div class="nav-item" data-page="settings" onclick="showPage('settings')">
+        <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1115.6 12 3.611 3.611 0 0112 15.6z"/></svg>
+        Setări
+      </div>
+
+    </div>
+    <div class="sidebar-footer">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+        <span class="badge-dot" id="ltStatusDot" style="background:var(--amber);width:8px;height:8px"></span>
+        <span id="ltStatusText" style="font-size:11px">LibreTranslate: --</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+        <span class="badge-dot" id="ollamaStatusDot" style="background:var(--amber);width:8px;height:8px"></span>
+        <span id="ollamaStatusText" style="font-size:11px">Ollama: --</span>
+      </div>
+      <div id="serverUptime" style="font-size:11px;color:var(--text3)">Uptime: --</div>
+      <div style="margin-top:6px"><a href="/logs.html" target="_blank" style="font-size:11px;color:var(--text3);text-decoration:underline">Loguri & Sistem</a></div>
+    </div>
+  </div>
+
+  <!-- Content Area -->
+  <div class="content">
+
+    <!-- ==================== PAGE: TRANSLATE ==================== -->
+    <div class="page active" id="page-translate">
+      <h2 class="page-title">Traducere nouă</h2>
+
+      <!-- Language selection -->
+      <div class="card">
+        <div class="card-body">
+          <div class="form-row">
+            <div class="form-group" style="margin-bottom:0">
+              <label class="form-label">Limba sursă</label>
+              <select class="form-control" id="sourceLang"></select>
+            </div>
+            <button class="swap-btn" onclick="swapLangs()" title="Inversează">
+              <svg viewBox="0 0 24 24"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
+            </button>
+            <div class="form-group" style="margin-bottom:0">
+              <label class="form-label">Limba țintă</label>
+              <select class="form-control" id="targetLang"></select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Upload -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Documente</span>
+          <span style="font-size:12px;color:var(--text3)">DOCX, PDF, TXT — max 50MB — mai multe fișiere simultan</span>
+        </div>
+        <div class="card-body">
+          <div class="upload-zone" id="uploadZone">
+            <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
+            <p>Click sau trageți documente aici</p>
+            <div class="hint">Formate acceptate: .docx, .pdf, .txt — puteți selecta mai multe fișiere</div>
+          </div>
+          <input type="file" id="fileInput" accept=".docx,.pdf,.txt,.text,.md" multiple style="display:none">
+          <div class="file-list" id="fileList"></div>
+        </div>
+      </div>
+
+      <!-- Or paste text -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Sau introduceți text direct</span>
+          <span id="directCharCount" style="font-size:12px;color:var(--text3)">0 caractere</span>
+        </div>
+        <div class="card-body">
+          <textarea class="form-control" id="directText" rows="5" placeholder="Lipiți textul aici..." style="resize:vertical;font-family:inherit"></textarea>
+        </div>
+      </div>
+
+      <!-- Translate button -->
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+        <button class="btn btn-primary" id="translateBtn" onclick="startTranslation()">
+          <svg viewBox="0 0 24 24"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
+          Traduce
+        </button>
+      </div>
+
+      <!-- Active jobs tracker (shown after submit) -->
+      <div class="active-jobs-panel" id="activeJobsPanel"></div>
+    </div>
+
+    <!-- ==================== PAGE: JOBS ==================== -->
+    <div class="page" id="page-jobs">
+      <h2 class="page-title">Toate job-urile</h2>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Istoric traduceri</span>
+          <span id="jobsCount" style="font-size:12px;color:var(--text3)">0 job-uri</span>
+        </div>
+        <div id="jobsList" style="max-height:600px;overflow-y:auto">
+          <div style="padding:40px;text-align:center;color:var(--text3)">Niciun job încă</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== PAGE: DASHBOARD ==================== -->
+    <div class="page" id="page-dashboard">
+      <h2 class="page-title">Dashboard server</h2>
+
+      <!-- Stats -->
+      <div class="stats-row">
+        <div class="stat-card">
+          <div class="stat-icon blue"><svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg></div>
+          <div class="stat-label">Utilizatori online</div>
+          <div class="stat-value" id="dashOnline">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon green"><svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></div>
+          <div class="stat-label">Job-uri active</div>
+          <div class="stat-value" id="dashActive">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon purple"><svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM7 10h2v7H7zm4-3h2v10h-2zm4 6h2v4h-2z"/></svg></div>
+          <div class="stat-label">Total job-uri</div>
+          <div class="stat-value" id="dashTotal">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon amber"><svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg></div>
+          <div class="stat-label">Uptime</div>
+          <div class="stat-value" id="dashUptime">--</div>
+        </div>
+      </div>
+
+      <!-- System Resources -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Resurse sistem</span>
+          <span class="badge blue" id="dashOllamaStatus"><span class="badge-dot"></span> Verificare...</span>
+        </div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px">
+            <div>
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:12px;font-weight:600;color:var(--text2)">CPU</span>
+                <span style="font-size:12px;font-weight:700" id="dashCpu">--%</span>
+              </div>
+              <div class="meter"><div class="meter-fill blue" id="dashCpuBar" style="width:0%"></div></div>
+              <div style="font-size:11px;color:var(--text3);margin-top:4px" id="dashCpuDetail">-- cores</div>
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:12px;font-weight:600;color:var(--text2)">RAM</span>
+                <span style="font-size:12px;font-weight:700" id="dashRam">--%</span>
+              </div>
+              <div class="meter"><div class="meter-fill green" id="dashRamBar" style="width:0%"></div></div>
+              <div style="font-size:11px;color:var(--text3);margin-top:4px" id="dashRamDetail">-- / -- GB</div>
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:12px;font-weight:600;color:var(--text2)">Disk</span>
+                <span style="font-size:12px;font-weight:700" id="dashDisk">--%</span>
+              </div>
+              <div class="meter"><div class="meter-fill amber" id="dashDiskBar" style="width:0%"></div></div>
+              <div style="font-size:11px;color:var(--text3);margin-top:4px" id="dashDiskDetail">-- / -- GB</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- GPU / Loaded Models -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Modele încărcate în memorie (GPU/RAM)</span></div>
+        <div class="card-body" id="dashGpuModels">
+          <div style="color:var(--text3);font-size:13px">Niciun model încărcat în memorie</div>
+        </div>
+      </div>
+
+      <!-- Installed Models -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Modele Ollama instalate</span></div>
+        <div class="card-body" id="dashModelsList">
+          <div style="color:var(--text3);font-size:13px">Niciun model instalat</div>
+        </div>
+      </div>
+
+      <!-- Connected Clients -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Clienți conectați</span>
+          <span class="badge blue" id="dashClientsCount">0</span>
+        </div>
+        <div class="card-body" id="dashClientsList">
+          <div style="color:var(--text3);font-size:13px">Niciun client conectat</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== PAGE: SETTINGS ==================== -->
+    <div class="page" id="page-settings">
+      <h2 class="page-title">Setări</h2>
+
+      <!-- Translation Engine -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Motor de traducere</span>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">Motor activ</label>
+            <select class="form-control" id="engineSelect" onchange="onEngineChange()">
+              <option value="ollama">Ollama (GPU, calitate superioară)</option>
+              <option value="libretranslate">LibreTranslate (CPU/RAM, rapid, fără GPU)</option>
+            </select>
+            <div class="form-hint">Ollama folosește modele LLM mari pe GPU. LibreTranslate folosește modele Argos Translate mici, rulează exclusiv pe CPU/RAM.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Ollama Connection -->
+      <div class="card" id="ollamaSettingsCard">
+        <div class="card-header">
+          <span class="card-title">Conexiune Ollama</span>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">URL Ollama</label>
+            <input class="form-control" id="ollamaUrl" value="http://localhost:11434" placeholder="http://localhost:11434">
+            <div class="form-hint">Adresa serverului Ollama. Modificați dacă rulează pe alt port sau altă mașină.</div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-secondary btn-sm" onclick="testConnection()">
+              <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+              Testează conexiunea
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="refreshModels()">
+              <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+              Reîncarcă modele
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Model Selection -->
+      <div class="card" id="modelSettingsCard">
+        <div class="card-header">
+          <span class="card-title">Model de traducere</span>
+          <span class="badge blue" id="modelsStatusBadge"><span class="badge-dot"></span> Se încarcă...</span>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">Model instalat</label>
+            <select class="form-control" id="modelSelect">
+              <option value="">Se încarcă modelele...</option>
+            </select>
+            <div class="form-hint">Lista modelelor instalate în Ollama. Apăsați „Reîncarcă modele" pentru a actualiza.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Sau model personalizat (override)</label>
+            <input class="form-control" id="customModel" placeholder="ex: llama3.1:8b, mistral:7b">
+            <div class="form-hint">Dacă specificați un model aici, va fi folosit în loc de cel selectat mai sus.</div>
+          </div>
+          <!-- Models table -->
+          <div id="settingsModelsList" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <!-- LibreTranslate Connection -->
+      <div class="card" id="libreSettingsCard" style="display:none">
+        <div class="card-header">
+          <span class="card-title">Conexiune LibreTranslate</span>
+          <span class="badge blue" id="libreStatusBadge"><span class="badge-dot"></span> Neverificat</span>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">URL LibreTranslate</label>
+            <input class="form-control" id="libreUrl" value="http://localhost:5000" placeholder="http://localhost:5000">
+            <div class="form-hint">Adresa serverului LibreTranslate. Implicit: http://localhost:5000</div>
+          </div>
+          <div style="display:flex;gap:8px;margin-bottom:14px">
+            <button class="btn btn-secondary btn-sm" onclick="testLibreConnection()">
+              <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+              Testează conexiunea
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="refreshLibreLanguages()">
+              <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+              Reîncarcă limbi
+            </button>
+          </div>
+          <!-- LibreTranslate languages table -->
+          <div id="libreLanguagesList" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <!-- Performance -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Performanță</span></div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">Concurrency (chunks în paralel)</label>
+            <input class="form-control" type="number" id="concurrency" value="3" min="1" max="10">
+            <div class="form-hint">Câte segmente se traduc simultan. Valori mai mari = mai rapid, dar mai multă memorie. Recomandat: 1-3 pentru GPU mic, 3-5 pentru GPU puternic.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Context window (num_ctx)</label>
+            <input class="form-control" type="number" id="numCtx" value="2048" min="512" max="32768" step="256">
+            <div class="form-hint">Dimensiunea ferestrei de context. Valori mai mici = mai rapid. 2048 e optim pentru traducere. Creșteți doar dacă aveți paragrafe foarte lungi.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LibreOffice PDF Conversion -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Conversie PDF (LibreOffice)</span></div>
+        <div class="card-body">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+            <label style="font-size:13px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:8px">
+              <input type="checkbox" id="convertToPdf">
+              Converteste documentele traduse in PDF (necesita LibreOffice headless)
+            </label>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="checkLibreOffice()">
+            <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+            Verifica LibreOffice
+          </button>
+          <div id="libreOfficeStatus" style="font-size:12px;color:var(--text3);margin-top:8px"></div>
+          <div class="form-hint" style="margin-top:8px">Daca este activat, documentele DOCX traduse vor fi convertite automat in PDF. LibreOffice headless trebuie sa fie instalat pe server/container.</div>
+        </div>
+      </div>
+
+      <!-- Notifications -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Notificări</span></div>
+        <div class="card-body">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+            <label style="font-size:13px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:8px">
+              <input type="checkbox" id="notifEnabled" checked>
+              Notificări browser la finalizare traducere
+            </label>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick="requestNotifPermission()">
+            <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M12 22c1.1 0 2-.9 2-2h-4a2 2 0 002 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+            Activează notificările
+          </button>
+          <div id="notifStatus" style="font-size:12px;color:var(--text3);margin-top:8px"></div>
+        </div>
+      </div>
+
+      <!-- Save button -->
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:16px">
+        <button class="btn btn-primary" onclick="saveSettingsManual()">
+          <svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg>
+          Salvează setările
+        </button>
+      </div>
+
+      <!-- About -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Despre</span></div>
+        <div class="card-body" style="font-size:13px;color:var(--text2)">
+          <p>Soluție de traducere offline cu două motoare: Ollama (GPU, calitate superioară) și LibreTranslate (CPU/RAM, rapid, fără GPU).</p>
+          <p style="margin-top:8px">Suportă documente DOCX (cu preservare format), PDF și TXT cu pipeline de procesare inteligent, traducere paralelă, retry automat și status în timp real.</p>
+          <p style="margin-top:8px">
+            <button class="btn-icon" onclick="toggleTheme()" style="display:inline-flex;gap:6px;padding:6px 12px">
+              <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 109 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 01-4.4 2.26 5.403 5.403 0 01-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/></svg>
+              Schimbă tema
+            </button>
+          </p>
+        </div>
+      </div>
+    </div>
+
+
+
+  </div><!-- /content -->
+</div><!-- /app -->
+
+<!-- Toast container (top right) -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+// ============================================================
+// LANGUAGES
+// ============================================================
+const LANGS = [
+  {c:'ro',n:'Română'},{c:'en',n:'Engleză'},{c:'fr',n:'Franceză'},{c:'de',n:'Germană'},
+  {c:'es',n:'Spaniolă'},{c:'it',n:'Italiană'},{c:'pt',n:'Portugheză'},{c:'nl',n:'Olandeză'},
+  {c:'pl',n:'Poloneză'},{c:'cs',n:'Cehă'},{c:'sk',n:'Slovacă'},{c:'hu',n:'Maghiară'},
+  {c:'bg',n:'Bulgară'},{c:'hr',n:'Croată'},{c:'sl',n:'Slovenă'},{c:'sr',n:'Sârbă'},
+  {c:'sq',n:'Albaneză'},{c:'mk',n:'Macedoneană'},{c:'uk',n:'Ucraineană'},{c:'ru',n:'Rusă'},
+  {c:'el',n:'Greacă'},{c:'tr',n:'Turcă'},{c:'ar',n:'Arabă'},{c:'he',n:'Ebraică'},
+  {c:'fa',n:'Persană'},{c:'hi',n:'Hindi'},{c:'bn',n:'Bengali'},{c:'ja',n:'Japoneză'},
+  {c:'ko',n:'Coreeană'},{c:'zh-Hans',n:'Chineză (simplificată)'},{c:'zh-Hant',n:'Chineză (tradițională)'},
+  {c:'th',n:'Thailandeză'},{c:'vi',n:'Vietnameză'},{c:'sv',n:'Suedeză'},{c:'da',n:'Daneză'},
+  {c:'no',n:'Norvegiană'},{c:'fi',n:'Finlandeză'},{c:'et',n:'Estonă'},{c:'lt',n:'Lituaniană'},
+  {c:'lv',n:'Letonă'},{c:'id',n:'Indoneziană'},{c:'ms',n:'Malaeziană'},
+  {c:'af',n:'Afrikaans'},{c:'sw',n:'Swahili'},{c:'ca',n:'Catalană'},{c:'gl',n:'Galiciană'},
+  {c:'cy',n:'Galeză'},{c:'ga',n:'Irlandeză'},{c:'mt',n:'Malteză'},
+  {c:'ta',n:'Tamil'},{c:'te',n:'Telugu'},{c:'kn',n:'Kannada'},{c:'ml',n:'Malayalam'},
+  {c:'mr',n:'Marathi'},{c:'gu',n:'Gujarati'},{c:'ur',n:'Urdu'}
+];
+
+// ============================================================
+// STATE
+// ============================================================
+let activeJobs = {};  // jobId -> {sse, data}
+let ws = null;
+let selectedFiles = [];  // Array of File objects
+
+const $ = id => document.getElementById(id);
+
+// ============================================================
+// INIT
+// ============================================================
+function init() {
+  const src = $('sourceLang'), tgt = $('targetLang');
+  LANGS.forEach(l => {
+    src.add(new Option(l.n, l.c));
+    tgt.add(new Option(l.n, l.c));
+  });
+  src.value = 'ro';
+  tgt.value = 'en';
+
+  if (localStorage.getItem('theme') === 'dark') document.body.setAttribute('data-theme', 'dark');
+  if (localStorage.getItem('ollamaUrl')) $('ollamaUrl').value = localStorage.getItem('ollamaUrl');
+  if (localStorage.getItem('libreUrl')) $('libreUrl').value = localStorage.getItem('libreUrl');
+  if (localStorage.getItem('customModel')) $('customModel').value = localStorage.getItem('customModel');
+  if (localStorage.getItem('concurrency')) $('concurrency').value = localStorage.getItem('concurrency');
+  if (localStorage.getItem('numCtx')) $('numCtx').value = localStorage.getItem('numCtx');
+  if (localStorage.getItem('notifEnabled') === 'false') $('notifEnabled').checked = false;
+  if (localStorage.getItem('convertToPdf') === 'true') $('convertToPdf').checked = true;
+  if (localStorage.getItem('engine')) {
+    $('engineSelect').value = localStorage.getItem('engine');
+  }
+  onEngineChange();  // Show/hide appropriate settings
+  checkLibreOffice();  // Check LibreOffice availability
+
+  setupUpload();
+  $('directText').addEventListener('input', () => {
+    $('directCharCount').textContent = $('directText').value.length + ' caractere';
+  });
+
+  connectWS();
+  loadJobs();
+  refreshModels();
+  updateNotifStatus();
+}
+
+// ============================================================
+// ENGINE SELECTION
+// ============================================================
+function onEngineChange() {
+  const engine = $('engineSelect').value;
+  const isOllama = engine === 'ollama';
+  $('ollamaSettingsCard').style.display = isOllama ? '' : 'none';
+  $('modelSettingsCard').style.display = isOllama ? '' : 'none';
+  $('libreSettingsCard').style.display = isOllama ? 'none' : '';
+  // Update sidebar status text
+  if (isOllama) {
+    // Will be updated by WS
+  } else {
+    $('ollamaStatusText').textContent = 'Motor: LibreTranslate';
+    $('ollamaStatusDot').style.background = 'var(--primary)';
+  }
+}
+
+async function testLibreConnection() {
+  const url = $('libreUrl').value.trim();
+  try {
+    const resp = await fetch(`/api/libretranslate?url=${encodeURIComponent(url)}`);
+    const data = await resp.json();
+    if (data.connected) {
+      toast(`LibreTranslate conectat! ${data.languages.length} limbi disponibile.`, 'success');
+      $('libreStatusBadge').className = 'badge green';
+      $('libreStatusBadge').innerHTML = `<span class="badge-dot"></span> ${data.languages.length} limbi`;
+      renderLibreLanguages(data.languages);
+    } else {
+      toast('Nu se poate conecta la LibreTranslate', 'error');
+      $('libreStatusBadge').className = 'badge red';
+      $('libreStatusBadge').innerHTML = '<span class="badge-dot"></span> Deconectat';
+    }
+  } catch (e) {
+    toast('Eroare: ' + e.message, 'error');
+  }
+}
+
+async function refreshLibreLanguages() {
+  await testLibreConnection();
+}
+
+function renderLibreLanguages(languages) {
+  if (!languages || !languages.length) {
+    $('libreLanguagesList').innerHTML = '<div style="color:var(--text3);font-size:13px">Nicio limb\u0103 disponibil\u0103</div>';
+    return;
+  }
+  $('libreLanguagesList').innerHTML = `<table class="table-simple">
+    <thead><tr><th>Cod</th><th>Limb\u0103</th></tr></thead>
+    <tbody>${languages.map(l => `<tr><td><code>${l.code}</code></td><td>${l.name}</td></tr>`).join('')}</tbody>
+  </table>`;
+}
+
+// ============================================================
+// NAVIGATION
+// ============================================================
+function showPage(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  $('page-' + page).classList.add('active');
+  document.querySelector(`.nav-item[data-page="${page}"]`).classList.add('active');
+  if (page === 'jobs') loadJobs();
+}
+
+// ============================================================
+// FILE UPLOAD (MULTIPLE)
+// ============================================================
+function setupUpload() {
+  const zone = $('uploadZone'), input = $('fileInput');
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) addFiles(Array.from(e.dataTransfer.files));
+  });
+  input.addEventListener('change', e => {
+    if (e.target.files.length) addFiles(Array.from(e.target.files));
+    input.value = '';  // Reset so same file can be re-added
+  });
+}
+
+function addFiles(files) {
+  const allowed = ['docx','pdf','txt','text','md'];
+  let added = 0;
+  for (const f of files) {
+    const ext = f.name.split('.').pop().toLowerCase();
+    if (!allowed.includes(ext)) {
+      toast(`Format nesuportat: ${f.name}`, 'error');
+      continue;
+    }
+    // Avoid duplicates by name+size
+    if (selectedFiles.some(sf => sf.name === f.name && sf.size === f.size)) continue;
+    selectedFiles.push(f);
+    added++;
+  }
+  if (added > 0) {
+    renderFileList();
+    $('directText').value = '';
+    $('directCharCount').textContent = '0 caractere';
+  }
+}
+
+function removeFile(index) {
+  selectedFiles.splice(index, 1);
+  renderFileList();
+}
+
+function clearAllFiles() {
+  selectedFiles = [];
+  renderFileList();
+}
+
+function renderFileList() {
+  const el = $('fileList');
+  if (!selectedFiles.length) {
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = selectedFiles.map((f, i) =>
+    `<div class="file-item">
+      <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+      <div class="file-item-info">
+        <div class="file-item-name">${f.name}</div>
+        <div class="file-item-size">${fmtBytes(f.size)}</div>
+      </div>
+      <button class="file-item-remove" onclick="removeFile(${i})" title="Elimină">
+        <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+      </button>
+    </div>`
+  ).join('') +
+  `<div style="display:flex;gap:8px;margin-top:8px">
+    <button class="btn btn-sm btn-secondary" onclick="document.getElementById('fileInput').click()">+ Adaugă fișiere</button>
+    <button class="btn btn-sm btn-secondary" onclick="clearAllFiles()">Șterge toate</button>
+    <span style="font-size:12px;color:var(--text3);align-self:center;margin-left:auto">${selectedFiles.length} fișier${selectedFiles.length > 1 ? 'e' : ''} · ${fmtBytes(selectedFiles.reduce((a,f) => a+f.size, 0))}</span>
+  </div>`;
+}
+
+function fmtBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b/1048576).toFixed(1) + ' MB';
+  return (b/1073741824).toFixed(2) + ' GB';
+}
+
+// ============================================================
+// TRANSLATION (multiple files)
+// ============================================================
+async function startTranslation() {
+  const directText = $('directText').value.trim();
+
+  if (!selectedFiles.length && !directText) {
+    toast('Încărcați documente sau introduceți text', 'error');
+    return;
+  }
+
+  // Save settings
+  saveSettings();
+
+  const engine = $('engineSelect').value;
+  const model = $('customModel').value.trim() || $('modelSelect').value;
+  const ollamaUrl = $('ollamaUrl').value.trim();
+  const libreUrl = $('libreUrl').value.trim();
+  const concurrency = parseInt($('concurrency').value) || 3;
+  const numCtx = parseInt($('numCtx').value) || 2048;
+
+  $('translateBtn').disabled = true;
+  $('translateBtn').innerHTML = '<span class="spinner"></span> Se trimite...';
+
+  let filesToSend = [];
+  if (selectedFiles.length) {
+    filesToSend = [...selectedFiles];
+  } else {
+    const blob = new Blob([directText], { type: 'text/plain' });
+    filesToSend = [new File([blob], 'text_direct.txt', { type: 'text/plain' })];
+  }
+
+  let submitted = 0;
+  for (const file of filesToSend) {
+    const formData = new FormData();
+    formData.append('source_lang', $('sourceLang').value);
+    formData.append('target_lang', $('targetLang').value);
+    formData.append('model', model);
+    formData.append('ollama_url', ollamaUrl);
+    formData.append('concurrency', concurrency);
+    formData.append('num_ctx', numCtx);
+    formData.append('engine', engine);
+    formData.append('libretranslate_url', libreUrl);
+    formData.append('convert_to_pdf', $('convertToPdf').checked ? 'true' : 'false');
+    formData.append('file', file);
+
+    try {
+      const resp = await fetch('/api/translate', { method: 'POST', body: formData });
+      if (!resp.ok) {
+        const err = await resp.json();
+        throw new Error(err.detail || 'Upload failed');
+      }
+      const data = await resp.json();
+      submitted++;
+
+      // Track this job
+      trackJob(data.job_id, file.name);
+    } catch (e) {
+      toast(`Eroare la ${file.name}: ${e.message}`, 'error');
+    }
+  }
+
+  // Reset upload zone
+  selectedFiles = [];
+  renderFileList();
+  $('directText').value = '';
+  $('directCharCount').textContent = '0 caractere';
+
+  $('translateBtn').disabled = false;
+  $('translateBtn').innerHTML = '<svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg> Traduce';
+
+  if (submitted > 0) {
+    const msg = submitted === 1
+      ? `Documentul a fost trimis pentru traducere`
+      : `${submitted} documente au fost trimise pentru traducere`;
+    toast(msg, 'success');
+  }
+}
+
+// ============================================================
+// ACTIVE JOB TRACKING (multiple)
+// ============================================================
+function trackJob(jobId, filename) {
+  const sse = new EventSource(`/api/jobs/${jobId}/events`);
+  activeJobs[jobId] = { sse, data: null, filename };
+
+  sse.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    activeJobs[jobId].data = d;
+    renderActiveJobs();
+
+    // Check if finished
+    if (['completed','failed','cancelled'].includes(d.status)) {
+      sse.close();
+      // Browser notification
+      if (d.status === 'completed') {
+        sendBrowserNotification(`Traducere finalizată: ${d.filename}`,
+          `${d.completed_chunks}/${d.total_chunks} segmente traduse în ${d.elapsed_seconds}s`);
+      } else if (d.status === 'failed') {
+        sendBrowserNotification(`Traducere eșuată: ${d.filename}`, d.error || 'Eroare necunoscută');
+      }
+    }
+  };
+
+  sse.onerror = () => {};
+  renderActiveJobs();
+}
+
+// Track which job event panels are open
+const openEventPanels = new Set();
+
+function renderActiveJobs() {
+  const panel = $('activeJobsPanel');
+  const jobIds = Object.keys(activeJobs);
+  if (!jobIds.length) {
+    panel.innerHTML = '';
+    return;
+  }
+
+  // Save state of open details panels before re-render
+  panel.querySelectorAll('details[data-job-id]').forEach(det => {
+    if (det.open) openEventPanels.add(det.getAttribute('data-job-id'));
+    else openEventPanels.delete(det.getAttribute('data-job-id'));
+  });
+
+  panel.innerHTML = jobIds.map(jid => {
+    const j = activeJobs[jid];
+    const d = j.data;
+    if (!d) return `<div class="card active-job-card"><div class="card-body"><span class="spinner-dark"></span> Se inițializează ${j.filename}...</div></div>`;
+
+    const isFinished = ['completed','failed','cancelled'].includes(d.status);
+    const statusColors = {completed:'green',failed:'red',cancelled:'amber'};
+    const statusLabels = {completed:'Complet',failed:'Eșuat',cancelled:'Anulat',translating:'Se traduce',extracting:'Se extrage',chunking:'Se împarte',assembling:'Se asamblează',queued:'În așteptare'};
+    const badgeColor = statusColors[d.status] || 'blue';
+    const badgeLabel = statusLabels[d.status] || d.status;
+    const progressClass = d.status === 'completed' ? 'done' : d.status === 'failed' ? 'error' : '';
+
+    const icons = {success:'✓', error:'✗', warning:'⚠', info:'ℹ'};
+    const eventsHtml = (d.events || []).map(ev =>
+      `<div class="event-line"><span class="event-time">${ev.time}</span><span class="event-type ${ev.type}">${icons[ev.type]||'·'}</span><span class="event-msg"><strong>${ev.message}</strong> ${ev.detail ? '— '+ev.detail : ''}</span></div>`
+    ).join('');
+
+    return `<div class="card active-job-card">
+      <div class="card-header">
+        <span class="card-title">${d.filename}</span>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span class="badge ${badgeColor}"><span class="badge-dot ${isFinished?'':'pulse'}"></span> ${badgeLabel}</span>
+          ${!isFinished ? `<button class="btn btn-sm btn-danger" onclick="cancelJob('${jid}')">Anulează</button>` : ''}
+          ${isFinished ? `<button class="btn btn-sm btn-secondary" onclick="dismissJob('${jid}')">Închide</button>` : ''}
+        </div>
+      </div>
+      <div class="card-body">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+          <span style="font-size:13px;color:var(--text2)">${d.current_step}</span>
+          <span style="font-size:13px;font-weight:600">${d.progress}%</span>
+        </div>
+        <div class="progress" style="height:10px;margin-bottom:12px">
+          <div class="progress-fill ${progressClass}" style="width:${d.progress}%"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px;margin-bottom:14px">
+          <div><span style="font-size:11px;color:var(--text3)">Segmente</span><br><strong>${d.completed_chunks}/${d.total_chunks}</strong></div>
+          <div><span style="font-size:11px;color:var(--text3)">Eșuate</span><br><strong style="color:var(--red)">${d.failed_chunks}</strong></div>
+          <div><span style="font-size:11px;color:var(--text3)">Reîncercări</span><br><strong style="color:var(--amber)">${d.retried_chunks}</strong></div>
+          <div><span style="font-size:11px;color:var(--text3)">Timp</span><br><strong>${d.elapsed_seconds ? d.elapsed_seconds + 's' : '--'}</strong></div>
+          <div><span style="font-size:11px;color:var(--text3)">Concurrency</span><br><strong>${d.concurrency}</strong></div>
+        </div>
+        ${d.status === 'completed' ? `<div style="margin-bottom:14px"><button class="btn btn-primary btn-sm" onclick="window.open('/api/jobs/${jid}/download')"><svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg> Descarcă documentul tradus</button></div>` : ''}
+        <details data-job-id="${jid}" ${openEventPanels.has(jid) ? 'open' : ''}>
+          <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--text2);margin-bottom:8px">Jurnal de evenimente (${(d.events||[]).length})</summary>
+          <div class="event-log">${eventsHtml}</div>
+        </details>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Auto-scroll event logs
+  panel.querySelectorAll('.event-log').forEach(el => el.scrollTop = el.scrollHeight);
+}
+
+function cancelJob(jobId) {
+  fetch(`/api/jobs/${jobId}/cancel`, {method:'POST'});
+}
+
+function dismissJob(jobId) {
+  if (activeJobs[jobId]) {
+    if (activeJobs[jobId].sse) activeJobs[jobId].sse.close();
+    delete activeJobs[jobId];
+  }
+  renderActiveJobs();
+}
+
+// ============================================================
+// BROWSER NOTIFICATIONS
+// ============================================================
+function sendBrowserNotification(title, body) {
+  if (!$('notifEnabled').checked) return;
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') {
+    new Notification(title, { body, icon: '🌐' });
+  }
+}
+
+async function checkLibreOffice() {
+  try {
+    const resp = await fetch('/api/libreoffice');
+    const data = await resp.json();
+    const el = $('libreOfficeStatus');
+    if (data.available) {
+      el.innerHTML = '<span style="color:var(--green)">&#10003; LibreOffice disponibil: ' + data.version + '</span>';
+    } else {
+      el.innerHTML = '<span style="color:var(--amber)">&#10007; LibreOffice nu este instalat. Conversia PDF nu va fi disponibila.</span>';
+    }
+  } catch (e) {
+    $('libreOfficeStatus').innerHTML = '<span style="color:var(--red)">Eroare la verificare: ' + e.message + '</span>';
+  }
+}
+
+function requestNotifPermission() {
+  if (!('Notification' in window)) {
+    toast('Browserul nu suportă notificări', 'error');
+    return;
+  }
+  Notification.requestPermission().then(perm => {
+    if (perm === 'granted') {
+      toast('Notificările au fost activate!', 'success');
+      new Notification('Traducător Offline', { body: 'Notificările sunt active. Veți fi anunțat la finalizarea traducerilor.' });
+    } else {
+      toast('Notificările au fost refuzate. Activați-le din setările browserului.', 'error');
+    }
+    updateNotifStatus();
+  });
+}
+
+function updateNotifStatus() {
+  const el = $('notifStatus');
+  if (!('Notification' in window)) {
+    el.textContent = 'Browserul nu suportă notificări.';
+    return;
+  }
+  const perm = Notification.permission;
+  if (perm === 'granted') el.textContent = 'Permisiune: acordată — veți primi notificări la finalizare.';
+  else if (perm === 'denied') el.textContent = 'Permisiune: refuzată — activați din setările browserului.';
+  else el.textContent = 'Permisiune: nesolicitată — apăsați butonul de mai sus.';
+}
+
+// ============================================================
+// MODELS (live from Ollama)
+// ============================================================
+async function refreshModels() {
+  const url = $('ollamaUrl').value.trim();
+  const badge = $('modelsStatusBadge');
+  badge.className = 'badge blue';
+  badge.innerHTML = '<span class="spinner-dark" style="width:10px;height:10px;border-width:1.5px"></span> Se încarcă...';
+
+  try {
+    const resp = await fetch(`/api/models?url=${encodeURIComponent(url)}`);
+    const data = await resp.json();
+
+    const sel = $('modelSelect');
+    sel.innerHTML = '';
+
+    if (data.connected && data.models.length) {
+      data.models.forEach(m => {
+        sel.add(new Option(`${m.name} (${fmtBytes(m.size)})`, m.name));
+      });
+      badge.className = 'badge green';
+      badge.innerHTML = `<span class="badge-dot"></span> ${data.models.length} modele`;
+
+      // Restore saved model
+      const saved = localStorage.getItem('selectedModel');
+      if (saved && data.models.some(m => m.name === saved)) sel.value = saved;
+
+      // Render table
+      $('settingsModelsList').innerHTML = `<table class="table-simple">
+        <thead><tr><th>Model</th><th>Dimensiune</th><th>Familie</th><th>Parametri</th></tr></thead>
+        <tbody>${data.models.map(m => {
+          const det = m.details || {};
+          return `<tr><td><strong>${m.name}</strong></td><td>${fmtBytes(m.size)}</td><td>${det.family || '-'}</td><td>${det.parameter_size || '-'}</td></tr>`;
+        }).join('')}</tbody>
+      </table>`;
+    } else if (data.connected) {
+      sel.add(new Option('Niciun model instalat', ''));
+      badge.className = 'badge amber';
+      badge.innerHTML = '<span class="badge-dot"></span> Fără modele';
+      $('settingsModelsList').innerHTML = '<div style="color:var(--text3);font-size:13px;margin-top:8px">Niciun model instalat. Rulați <code>ollama pull translategemma</code> pentru a instala un model.</div>';
+    } else {
+      sel.add(new Option('Ollama deconectat', ''));
+      badge.className = 'badge red';
+      badge.innerHTML = '<span class="badge-dot"></span> Deconectat';
+      $('settingsModelsList').innerHTML = '<div style="color:var(--red);font-size:13px;margin-top:8px">Nu se poate conecta la Ollama. Verificați dacă serverul rulează.</div>';
+    }
+  } catch (e) {
+    $('modelSelect').innerHTML = '<option value="">Eroare la încărcare</option>';
+    badge.className = 'badge red';
+    badge.innerHTML = '<span class="badge-dot"></span> Eroare';
+  }
+}
+
+// ============================================================
+// JOBS LIST
+// ============================================================
+async function loadJobs() {
+  try {
+    const resp = await fetch('/api/jobs');
+    const data = await resp.json();
+    renderJobs(data.jobs);
+  } catch {}
+}
+
+function renderJobs(jobsList) {
+  const el = $('jobsList');
+  const active = jobsList.filter(j => !['completed','failed','cancelled'].includes(j.status));
+  $('jobsBadge').style.display = active.length ? '' : 'none';
+  $('jobsBadge').textContent = active.length;
+  $('jobsCount').textContent = jobsList.length + ' job-uri';
+
+  if (!jobsList.length) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3)">Niciun job încă</div>';
+    return;
+  }
+
+  el.innerHTML = jobsList.map(j => {
+    const statusColors = {completed:'green',failed:'red',cancelled:'amber',translating:'blue',extracting:'blue',chunking:'blue',assembling:'blue',queued:'purple'};
+    const color = statusColors[j.status] || 'blue';
+    const engineLabel = j.engine === 'libretranslate' ? 'LibreTranslate' : (j.model || 'Ollama');
+    const isActive = ['translating','extracting','chunking','assembling','queued'].includes(j.status);
+    const isFinished = ['completed','failed','cancelled'].includes(j.status);
+    return `<div class="job-item">
+      <div class="job-info">
+        <div class="job-name">${j.filename}</div>
+        <div class="job-meta">${j.source_lang}\u2192${j.target_lang} \u00b7 ${engineLabel} \u00b7 ${j.client_ip} \u00b7 ${j.created_at.substring(11,19)}</div>
+      </div>
+      <div class="job-progress">
+        <div class="progress"><div class="progress-fill ${j.status==='completed'?'done':j.status==='failed'?'error':''}" style="width:${j.progress}%"></div></div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">${j.completed_chunks}/${j.total_chunks} seg.</div>
+      </div>
+      <span class="badge ${color}"><span class="badge-dot ${isActive?'pulse':''}"></span> ${j.status}</span>
+      <div class="job-actions">
+        ${isActive?`<button class="btn btn-sm btn-danger" onclick="cancelJob('${j.job_id}')" title="Anuleaz\u0103">\u25a0</button>`:''}
+        ${j.status==='completed'?`<button class="btn btn-sm btn-secondary" onclick="window.open('/api/jobs/${j.job_id}/download')" title="Descarc\u0103">\u2b07</button>`:''}
+        ${isFinished?`<button class="btn btn-sm btn-danger" onclick="deleteJob('${j.job_id}')" title="\u0218terge">\u2715</button>`:''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function deleteJob(id) {
+  if (!confirm('Sigur dori\u021bi s\u0103 \u0219terge\u021bi acest job \u0219i fi\u0219ierele asociate?')) return;
+  try {
+    await fetch(`/api/jobs/${id}`, {method:'DELETE'});
+    toast('Job \u0219ters cu succes', 'success');
+    loadJobs();
+  } catch (e) {
+    toast('Eroare la \u0219tergere: ' + e.message, 'error');
+  }
+}
+
+// ============================================================
+// DASHBOARD WEBSOCKET
+// ============================================================
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws/dashboard`);
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'init' || msg.type === 'update') updateDashboard(msg.data);
+    if (msg.type === 'job_update') loadJobs();
+  };
+
+  ws.onclose = () => { setTimeout(connectWS, 3000); };
+  ws.onerror = () => {};
+
+  setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
+  }, 20000);
+}
+
+function updateDashboard(d) {
+  $('dashOnline').textContent = d.connected_clients || 0;
+  $('dashActive').textContent = (d.active_jobs || []).length;
+  $('dashTotal').textContent = d.total_jobs || 0;
+  $('dashUptime').textContent = fmtDuration(d.uptime_seconds || 0);
+  $('serverUptime').textContent = 'Uptime: ' + fmtDuration(d.uptime_seconds || 0);
+
+  const sys = d.system || {};
+  $('dashCpu').textContent = (sys.cpu_percent || 0) + '%';
+  $('dashCpuBar').style.width = (sys.cpu_percent || 0) + '%';
+  $('dashCpuBar').className = 'meter-fill ' + (sys.cpu_percent > 80 ? 'red' : sys.cpu_percent > 50 ? 'amber' : 'blue');
+  $('dashCpuDetail').textContent = (sys.cpu_count || '--') + ' cores';
+
+  $('dashRam').textContent = (sys.ram_percent || 0) + '%';
+  $('dashRamBar').style.width = (sys.ram_percent || 0) + '%';
+  $('dashRamBar').className = 'meter-fill ' + (sys.ram_percent > 85 ? 'red' : sys.ram_percent > 60 ? 'amber' : 'green');
+  $('dashRamDetail').textContent = (sys.ram_used_gb || '--') + ' / ' + (sys.ram_total_gb || '--') + ' GB';
+
+  $('dashDisk').textContent = (sys.disk_percent || 0) + '%';
+  $('dashDiskBar').style.width = (sys.disk_percent || 0) + '%';
+  $('dashDiskDetail').textContent = (sys.disk_used_gb || '--') + ' / ' + (sys.disk_total_gb || '--') + ' GB';
+
+  const gpu = sys.gpu_models;
+  if (gpu && gpu.length) {
+    $('dashGpuModels').innerHTML = gpu.map(m =>
+      `<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)">
+        <span class="badge green"><span class="badge-dot"></span> Loaded</span>
+        <strong>${m.model}</strong>
+        <span style="font-size:12px;color:var(--text3)">${fmtBytes(m.size)} total, ${fmtBytes(m.vram)} VRAM</span>
+      </div>`
+    ).join('');
+  } else {
+    $('dashGpuModels').innerHTML = '<div style="color:var(--text3);font-size:13px">Niciun model încărcat în memorie</div>';
+  }
+
+  // LibreTranslate status (sidebar + dashboard)
+  const lt = d.libretranslate || {};
+  const ltDot = $('ltStatusDot');
+  const ltTxt = $('ltStatusText');
+  if (lt.connected) {
+    ltDot.style.background = 'var(--green)';
+    ltTxt.textContent = 'LibreTranslate: Online (' + lt.languages + ' limbi)';
+  } else {
+    ltDot.style.background = 'var(--red)';
+    ltTxt.textContent = 'LibreTranslate: Offline';
+  }
+
+  // Ollama status (sidebar + dashboard)
+  const ollama = d.ollama || {};
+  const dot = $('ollamaStatusDot');
+  const txt = $('ollamaStatusText');
+  const dashStatus = $('dashOllamaStatus');
+  if (ollama.connected) {
+    dot.style.background = 'var(--green)';
+    txt.textContent = 'Ollama: Online (' + (ollama.models||[]).length + ' modele)';
+    dashStatus.className = 'badge green';
+    dashStatus.innerHTML = '<span class="badge-dot"></span> Conectat';
+  } else {
+    dot.style.background = 'var(--red)';
+    txt.textContent = 'Ollama: Offline';
+    dashStatus.className = 'badge red';
+    dashStatus.innerHTML = '<span class="badge-dot"></span> Deconectat';
+  }
+
+  if (ollama.models && ollama.models.length) {
+    $('dashModelsList').innerHTML = `<table class="table-simple"><thead><tr><th>Model</th><th>Dimensiune</th><th>Familie</th></tr></thead><tbody>` +
+      ollama.models.map(m => `<tr><td><strong>${m.name}</strong></td><td>${fmtBytes(m.size)}</td><td>${(m.details||{}).family || '-'}</td></tr>`).join('') +
+      '</tbody></table>';
+  } else {
+    $('dashModelsList').innerHTML = '<div style="color:var(--text3);font-size:13px">Niciun model instalat</div>';
+  }
+
+  const clients = d.clients_detail || [];
+  $('dashClientsCount').textContent = clients.length;
+  if (clients.length) {
+    $('dashClientsList').innerHTML = clients.map(c =>
+      `<div class="client-row"><span class="client-dot"></span><span>${c.ip}</span><span style="color:var(--text3);font-size:12px;margin-left:auto">conectat la ${c.connected_at.substring(11,19)}</span></div>`
+    ).join('');
+  } else {
+    $('dashClientsList').innerHTML = '<div style="color:var(--text3);font-size:13px">Niciun client conectat</div>';
+  }
+
+  const activeCount = (d.active_jobs || []).length;
+  $('jobsBadge').style.display = activeCount ? '' : 'none';
+  $('jobsBadge').textContent = activeCount;
+}
+
+function fmtDuration(s) {
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  const h = Math.floor(s/3600);
+  const m = Math.floor((s%3600)/60);
+  return h + 'h ' + m + 'm';
+}
+
+// ============================================================
+// SETTINGS
+// ============================================================
+function saveSettingsManual() {
+  saveSettings();
+  toast('Setările au fost salvate cu succes!', 'success');
+}
+
+function saveSettings() {
+  localStorage.setItem('engine', $('engineSelect').value);
+  localStorage.setItem('ollamaUrl', $('ollamaUrl').value);
+  localStorage.setItem('libreUrl', $('libreUrl').value);
+  localStorage.setItem('selectedModel', $('modelSelect').value);
+  localStorage.setItem('customModel', $('customModel').value);
+  localStorage.setItem('concurrency', $('concurrency').value);
+  localStorage.setItem('numCtx', $('numCtx').value);
+  localStorage.setItem('notifEnabled', $('notifEnabled').checked);
+  localStorage.setItem('convertToPdf', $('convertToPdf').checked);
+}
+
+function swapLangs() {
+  const s = $('sourceLang'), t = $('targetLang');
+  const tmp = s.value; s.value = t.value; t.value = tmp;
+}
+
+function toggleTheme() {
+  const dark = document.body.getAttribute('data-theme') === 'dark';
+  document.body.setAttribute('data-theme', dark ? '' : 'dark');
+  localStorage.setItem('theme', dark ? 'light' : 'dark');
+}
+
+async function testConnection() {
+  const url = $('ollamaUrl').value.trim();
+  try {
+    const resp = await fetch(`/api/ollama?url=${encodeURIComponent(url)}`);
+    const data = await resp.json();
+    if (data.connected) {
+      toast(`Conectat! ${data.models.length} modele găsite.`, 'success');
+      refreshModels();
+    } else {
+      toast('Nu se poate conecta: ' + (data.error || 'unknown'), 'error');
+    }
+  } catch (e) {
+    toast('Eroare: ' + e.message, 'error');
+  }
+}
+
+// ============================================================
+// TOAST (top right)
+// ============================================================
+function toast(msg, type='info') {
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  t.textContent = msg;
+  $('toastContainer').appendChild(t);
+  requestAnimationFrame(() => t.classList.add('show'));
+  setTimeout(() => {
+    t.classList.remove('show');
+    setTimeout(() => t.remove(), 300);
+  }, 4000);
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ============================================================
+// START
+// ============================================================
+init();
+</script>
+</body>
+</html>
