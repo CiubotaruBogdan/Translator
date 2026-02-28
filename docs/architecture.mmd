@@ -1,79 +1,40 @@
-graph TB
-    subgraph USERS["🌐 Rețea Locală"]
-        B1["Browser 1<br/><i>Desktop</i>"]
-        B2["Browser 2<br/><i>Laptop</i>"]
-        B3["Browser N<br/><i>Telefon / Tabletă</i>"]
+graph LR
+    subgraph NET["🌐 Rețea Locală"]
+        U["🖥️ 💻 📱<br/><b>Browsere</b>"]
     end
 
-    subgraph HOST["🖥️ Windows 11 Host"]
-        PM["Podman Engine<br/><i>Container Runtime</i>"]
-        
-        subgraph OLLAMA["Ollama (GPU)"]
-            OA["Ollama API<br/><i>:11434</i>"]
-            OM["LLM Models<br/><i>translategemma, llama3, etc.</i>"]
+    subgraph HOST["🖥️ Windows 11"]
+        subgraph CONTAINER["📦 Container"]
+            FE["🎨 <b>Frontend</b><br/>SPA Dashboard"]
+            API["⚡ <b>FastAPI</b><br/>REST · WebSocket · SSE"]
+            PIPE["🔄 <b>Pipeline</b><br/>Extract → Chunk<br/>→ Translate → Assemble"]
+            DOC["📄 <b>Documente</b><br/>DOCX · PDF · OCR · TXT"]
+            LT["🐢 <b>LibreTranslate</b><br/>CPU · Argos Models<br/>ro ↔ en ↔ fr"]
+            STORE["💾 <b>Storage</b><br/>uploads · outputs"]
         end
 
-        subgraph CONTAINER["📦 Container: traducator-offline"]
-            EP["entrypoint.sh<br/><i>Auto-detect Ollama IP</i><br/><i>Network diagnostics</i>"]
-            
-            subgraph BACKEND["FastAPI Backend (server.py)"]
-                API["REST API<br/><i>/api/translate</i><br/><i>/api/status</i><br/><i>/api/jobs</i><br/><i>/api/network-diag</i>"]
-                WS["WebSocket<br/><i>/ws/dashboard</i>"]
-                SSE["SSE Events<br/><i>/api/jobs/{id}/events</i>"]
-                PIPE["Translation Pipeline<br/><i>Extract → Chunk → Translate → Assemble</i>"]
-                CRON["Cleanup Scheduler<br/><i>Daily @ midnight</i>"]
-            end
-
-            subgraph DOCPROC["Document Processing"]
-                DOCX["python-docx<br/><i>Format Preservation</i>"]
-                PDF2D["pdf2docx<br/><i>Digital PDF → DOCX</i>"]
-                OCR["Tesseract OCR<br/><i>Scanned PDF → Text</i>"]
-                PDFP["pdfplumber<br/><i>Fallback PDF reader</i>"]
-                LO["LibreOffice Headless<br/><i>DOCX → PDF export</i>"]
-            end
-
-            subgraph LT["LibreTranslate (CPU)"]
-                LTA["LibreTranslate API<br/><i>:5000 (internal)</i>"]
-                ARGOS["Argos Translate Models<br/><i>ro ↔ en ↔ fr</i>"]
-            end
-
-            subgraph FRONTEND["Web Frontend"]
-                IDX["index.html<br/><i>SPA Dashboard</i>"]
-                LOG["logs.html<br/><i>Logs & Network Diag</i>"]
-            end
-
-            subgraph STORAGE["Storage"]
-                UP["/app/uploads"]
-                OUT["/app/outputs"]
-            end
-        end
+        OLL["🦙 <b>Ollama</b><br/>GPU · LLM Models<br/>:11434"]
     end
 
-    B1 & B2 & B3 -->|"HTTP :80"| API
-    B1 & B2 & B3 -->|"WebSocket"| WS
-    API -->|"SSE stream"| B1 & B2 & B3
-    API --> FRONTEND
+    U -->|"HTTP :80"| FE
+    U -->|"WebSocket"| API
+    FE --> API
     API --> PIPE
-    PIPE --> DOCPROC
-    PIPE -->|"Parallel chunks"| LTA
-    PIPE -->|"Parallel chunks"| OA
-    OA --> OM
-    LTA --> ARGOS
-    DOCPROC --> STORAGE
-    PIPE --> STORAGE
-    EP -->|"starts"| LTA
-    EP -->|"starts"| API
+    PIPE --> DOC
+    PIPE -->|"chunks"| LT
+    PIPE -->|"chunks"| OLL
+    DOC --> STORE
+    PIPE --> STORE
+    API -->|"SSE events"| U
 
-    classDef container fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0c4a6e
-    classDef host fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
-    classDef ollama fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
-    classDef users fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764
-    classDef backend fill:#dbeafe,stroke:#2563eb,stroke-width:1px,color:#1e3a5f
-    classDef docproc fill:#fce7f3,stroke:#db2777,stroke-width:1px,color:#831843
-    classDef lt fill:#d1fae5,stroke:#059669,stroke-width:1px,color:#064e3b
-    classDef storage fill:#f1f5f9,stroke:#64748b,stroke-width:1px,color:#334155
+    classDef net fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764,font-size:14px
+    classDef host fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f,font-size:13px
+    classDef container fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0c4a6e,font-size:13px
+    classDef ollama fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d,font-size:13px
+    classDef node fill:#fff,stroke:#94a3b8,stroke-width:1px,color:#1e293b,font-size:12px
 
-    class CONTAINER container
+    class NET net
     class HOST host
-    class OLLAMA ollama
-    class USERS users
+    class CONTAINER container
+    class OLL ollama
+    class U,FE,API,PIPE,DOC,LT,STORE node

@@ -6,7 +6,54 @@ O soluție completă de traducere a documentelor, containerizată, proiectată p
 
 Soluția este construită pe o arhitectură modulară, centrată în jurul unui container Podman/Docker care rulează pe o mașină gazdă Windows. Această abordare asigură portabilitate maximă și un mediu de rulare izolat și consistent.
 
+```mermaid
+graph LR
+    subgraph NET["🌐 Rețea Locală"]
+        U["🖥️ 💻 📱<br/><b>Browsere</b>"]
+    end
+
+    subgraph HOST["🖥️ Windows 11"]
+        subgraph CONTAINER["📦 Container"]
+            FE["🎨 <b>Frontend</b><br/>SPA Dashboard"]
+            API["⚡ <b>FastAPI</b><br/>REST · WebSocket · SSE"]
+            PIPE["🔄 <b>Pipeline</b><br/>Extract → Chunk<br/>→ Translate → Assemble"]
+            DOC["📄 <b>Documente</b><br/>DOCX · PDF · OCR · TXT"]
+            LT["🐢 <b>LibreTranslate</b><br/>CPU · Argos Models<br/>ro ↔ en ↔ fr"]
+            STORE["💾 <b>Storage</b><br/>uploads · outputs"]
+        end
+
+        OLL["🦙 <b>Ollama</b><br/>GPU · LLM Models<br/>:11434"]
+    end
+
+    U -->|"HTTP :80"| FE
+    U -->|"WebSocket"| API
+    FE --> API
+    API --> PIPE
+    PIPE --> DOC
+    PIPE -->|"chunks"| LT
+    PIPE -->|"chunks"| OLL
+    DOC --> STORE
+    PIPE --> STORE
+    API -->|"SSE events"| U
+
+    classDef net fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#3b0764
+    classDef host fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef container fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0c4a6e
+    classDef ollama fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef node fill:#fff,stroke:#94a3b8,stroke-width:1px,color:#1e293b
+
+    class NET net
+    class HOST host
+    class CONTAINER container
+    class OLL ollama
+    class U,FE,API,PIPE,DOC,LT,STORE node
+```
+
+<details><summary>📷 Versiune statică (PNG)</summary>
+
 ![Diagrama Arhitecturii](docs/architecture.png)
+
+</details>
 
 ### Componente Cheie
 
@@ -51,3 +98,4 @@ Pentru instrucțiuni detaliate de instalare și utilizare, consultați **[TUTORI
 
 -   **Card Caractere redus cu 30%**: dimensiunea a fost micșorată de la 250px la 175px pentru un layout mai compact.
 -   **Coloanele 2 și 3 unificate**: cardurile de statistici (Caractere, Segmente, Timp total), bara de progres, badge-ul de status și butoanele de acțiuni sunt acum grupate într-o singură coloană, aliniată la dreapta.
+-   **Diagramă arhitectură simplificată**: schema a fost refăcută în Mermaid interactiv, cu un design mai curat și vizual. PNG-ul este disponibil ca fallback.
