@@ -1,6 +1,6 @@
 """
-Offline Document Translator - Server v3
-========================================
+Offline Document Translator - Server
+=====================================
 FastAPI backend with:
 - Format-preserving DOCX translation (styles, bold, italic, fonts, tables)
 - Document processing pipeline (DOCX, PDF, TXT)
@@ -1382,7 +1382,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     schedule_daily_cleanup()
     print("=" * 60)
-    print("  Offline Document Translator - Server v4 (Container)")
+    print("  Offline Document Translator - Server")
     print(f"  Web UI:       http://0.0.0.0:{port}")
     print(f"  Ollama:       {DEFAULT_OLLAMA_URL} (external)")
     print(f"  LibreTranslate: {DEFAULT_LIBRETRANSLATE_URL} (internal)")

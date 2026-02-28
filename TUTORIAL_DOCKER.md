@@ -1,7 +1,5 @@
 # Traducător Offline — Tutorial de Instalare și Utilizare
 
-**Versiune: 4.0**
-
 Acest tutorial acoperă întregul proces de construire, export, transfer și rulare a soluției de traducere offline într-un container Podman pe o stație Windows 11. Procesul este simplificat folosind scripturile interactive `builder.bat` (pe stația online) și `traducator_manager.bat` (pe stația offline).
 
 ## Cuprins
@@ -150,7 +148,7 @@ LibreTranslate are nevoie de 30-60 de secunde pentru a se inițializa la pornire
 
 ### Problema: Eroare „`. was unexpected at this time.`"
 
-Această eroare apărea în versiunile anterioare ale scriptului din cauza caracterelor speciale din URL-uri procesate de batch cu `delayedexpansion`. Versiunea actuală a scriptului `traducator_manager.bat` rezolvă această problemă. Asigurați-vă că folosiți versiunea actualizată.
+Această eroare era cauzată de caracterele speciale din URL-uri procesate de batch cu `delayedexpansion`. Scriptul actual `traducator_manager.bat` rezolvă această problemă. Asigurați-vă că folosiți scriptul din acest pachet.
 
 ### Acces shell în container (pentru depanare avansată)
 
