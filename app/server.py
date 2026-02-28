@@ -1084,13 +1084,16 @@ async def api_translate(
     source_lang: str = Form("ro"),
     target_lang: str = Form("en"),
     model: str = Form(DEFAULT_MODEL),
-    ollama_url: str = Form(DEFAULT_OLLAMA_URL),
+    ollama_url: str = Form(""),
     concurrency: int = Form(DEFAULT_CONCURRENCY),
     num_ctx: int = Form(DEFAULT_NUM_CTX),
     engine: str = Form(DEFAULT_ENGINE),
     libretranslate_url: str = Form(DEFAULT_LIBRETRANSLATE_URL),
     convert_to_pdf: str = Form("false")
 ):
+    # Use server-detected URL if client sends empty
+    if not ollama_url:
+        ollama_url = DEFAULT_OLLAMA_URL
     ext = Path(file.filename).suffix.lower()
     if ext not in ('.docx', '.pdf', '.txt', '.text', '.md'):
         raise HTTPException(400, f"Unsupported: {ext}")

@@ -491,7 +491,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         <div class="card-body">
           <div class="form-group">
             <label class="form-label">URL Ollama</label>
-            <input class="form-control" id="ollamaUrl" value="http://localhost:11434" placeholder="http://localhost:11434">
+            <input class="form-control" id="ollamaUrl" value="" placeholder="Se detecteaza automat...">
             <div class="form-hint">Adresa serverului Ollama. Modificați dacă rulează pe alt port sau altă mașină.</div>
           </div>
           <div style="display:flex;gap:8px">
@@ -688,7 +688,17 @@ function init() {
   tgt.value = 'en';
 
   if (localStorage.getItem('theme') === 'dark') document.body.setAttribute('data-theme', 'dark');
-  if (localStorage.getItem('ollamaUrl')) $('ollamaUrl').value = localStorage.getItem('ollamaUrl');
+  // Fetch server-detected Ollama URL if user hasn't saved a custom one
+  if (localStorage.getItem('ollamaUrl')) {
+    $('ollamaUrl').value = localStorage.getItem('ollamaUrl');
+  } else {
+    fetch('/api/system-info').then(r => r.json()).then(info => {
+      if (info.ollama_url && !localStorage.getItem('ollamaUrl')) {
+        $('ollamaUrl').value = info.ollama_url;
+        refreshModels(); // Re-fetch models with correct URL
+      }
+    }).catch(() => {});
+  }
   if (localStorage.getItem('libreUrl')) $('libreUrl').value = localStorage.getItem('libreUrl');
   if (localStorage.getItem('customModel')) $('customModel').value = localStorage.getItem('customModel');
   if (localStorage.getItem('concurrency')) $('concurrency').value = localStorage.getItem('concurrency');
@@ -895,7 +905,7 @@ async function startTranslation() {
     formData.append('source_lang', $('sourceLang').value);
     formData.append('target_lang', $('targetLang').value);
     formData.append('model', model);
-    formData.append('ollama_url', ollamaUrl);
+    formData.append('ollama_url', ollamaUrl || '');  // empty = server uses auto-detected URL
     formData.append('concurrency', concurrency);
     formData.append('num_ctx', numCtx);
     formData.append('engine', engine);
@@ -1108,11 +1118,13 @@ function updateNotifStatus() {
 async function refreshModels() {
   const url = $('ollamaUrl').value.trim();
   const badge = $('modelsStatusBadge');
+  // If URL is empty, use server default (auto-detected)
+  const queryUrl = url ? `?url=${encodeURIComponent(url)}` : '';
   badge.className = 'badge blue';
   badge.innerHTML = '<span class="spinner-dark" style="width:10px;height:10px;border-width:1.5px"></span> Se încarcă...';
 
   try {
-    const resp = await fetch(`/api/models?url=${encodeURIComponent(url)}`);
+    const resp = await fetch(`/api/models${queryUrl}`);
     const data = await resp.json();
 
     const sel = $('modelSelect');
@@ -1292,6 +1304,13 @@ function updateDashboard(d) {
     txt.textContent = 'Ollama: Online (' + (ollama.models||[]).length + ' modele)';
     dashStatus.className = 'badge green';
     dashStatus.innerHTML = '<span class="badge-dot"></span> Conectat';
+    // Sync ollamaUrl field if empty or default
+    const urlField = $('ollamaUrl');
+    if (!urlField.value || urlField.value === 'http://localhost:11434') {
+      fetch('/api/system-info').then(r => r.json()).then(info => {
+        if (info.ollama_url) urlField.value = info.ollama_url;
+      }).catch(() => {});
+    }
   } else {
     dot.style.background = 'var(--red)';
     txt.textContent = 'Ollama: Offline';
@@ -1363,8 +1382,9 @@ function toggleTheme() {
 
 async function testConnection() {
   const url = $('ollamaUrl').value.trim();
+  const queryUrl = url ? `?url=${encodeURIComponent(url)}` : '';
   try {
-    const resp = await fetch(`/api/ollama?url=${encodeURIComponent(url)}`);
+    const resp = await fetch(`/api/ollama${queryUrl}`);
     const data = await resp.json();
     if (data.connected) {
       toast(`Conectat! ${data.models.length} modele găsite.`, 'success');
