@@ -44,3 +44,10 @@ Soluția este construită pe o arhitectură modulară, centrată în jurul unui 
 -   **`traducator_manager.bat` (Stația Offline)**: Oferă un meniu complet pentru a încărca imaginea, a porni/opri serviciile, a vizualiza loguri și a rula diagnosticări de rețea.
 
 Pentru instrucțiuni detaliate de instalare și utilizare, consultați **[TUTORIAL_DOCKER.md](TUTORIAL_DOCKER.md)**.
+
+## Changelog
+
+### v1.1 — Îmbunătățiri UI (pagina Job-uri)
+
+-   **Card Caractere redus cu 30%**: dimensiunea a fost micșorată de la 250px la 175px pentru un layout mai compact.
+-   **Coloanele 2 și 3 unificate**: cardurile de statistici (Caractere, Segmente, Timp total), bara de progres, badge-ul de status și butoanele de acțiuni sunt acum grupate într-o singură coloană, aliniată la dreapta.
