@@ -76,12 +76,14 @@ DEFAULT_OLLAMA_URL = _ollama_env if _ollama_env != "auto" else "http://host.cont
 DEFAULT_LIBRETRANSLATE_URL = os.environ.get("LIBRETRANSLATE_URL", "http://127.0.0.1:5000")
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "translategemma")
 DEFAULT_ENGINE = os.environ.get("TRANSLATE_ENGINE", "ollama")  # 'ollama' or 'libretranslate'
-MAX_CHUNK_CHARS = 1500
+MAX_CHUNK_CHARS = 3000
+DEFAULT_BATCH_SIZE = 3          # segments per Ollama request
 MAX_RETRIES = 3
 RETRY_DELAY = 2
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 DEFAULT_CONCURRENCY = 3
-DEFAULT_NUM_CTX = 2048
+DEFAULT_NUM_CTX = 4096
+DEFAULT_KEEP_ALIVE = "30m"
 
 LANG_EN = {
     'ro': 'Romanian', 'en': 'English', 'fr': 'French', 'de': 'German',
@@ -177,7 +179,8 @@ class TranslationJob:
     def __init__(self, job_id, filename, source_lang, target_lang, model, ollama_url,
                  client_ip, concurrency=DEFAULT_CONCURRENCY, num_ctx=DEFAULT_NUM_CTX,
                  engine="ollama", libretranslate_url=DEFAULT_LIBRETRANSLATE_URL,
-                 convert_to_pdf=False):
+                 convert_to_pdf=False, batch_size=DEFAULT_BATCH_SIZE,
+                 keep_alive=DEFAULT_KEEP_ALIVE, chunk_size=MAX_CHUNK_CHARS):
         self.job_id = job_id
         self.filename = filename
         self.source_lang = source_lang
@@ -190,6 +193,9 @@ class TranslationJob:
         self.engine = engine  # 'ollama' or 'libretranslate'
         self.libretranslate_url = libretranslate_url
         self.convert_to_pdf = convert_to_pdf
+        self.batch_size = batch_size
+        self.keep_alive = keep_alive
+        self.chunk_size = chunk_size
         self.status = JobStatus.QUEUED
         self.progress = 0.0
         self.current_step = "Queued"
@@ -253,6 +259,9 @@ class TranslationJob:
             "completed_at": self.completed_at,
             "elapsed_seconds": elapsed,
             "output_file": self.output_file,
+            "batch_size": self.batch_size,
+            "keep_alive": self.keep_alive,
+            "chunk_size": self.chunk_size,
             "events": self.events[-100:]
         }
 
@@ -703,7 +712,8 @@ async def translate_chunk_libretranslate(session, text, src, tgt, lt_url):
 # ============================================================
 
 async def translate_chunk(session, text, src, tgt, model, url,
-                          num_ctx=DEFAULT_NUM_CTX, context=""):
+                          num_ctx=DEFAULT_NUM_CTX, context="",
+                          keep_alive=DEFAULT_KEEP_ALIVE):
     src_name = LANG_EN.get(src, src)
     tgt_name = LANG_EN.get(tgt, tgt)
     ctx = ""
@@ -716,7 +726,7 @@ async def translate_chunk(session, text, src, tgt, model, url,
         f"Translate the following {src_name} text into {tgt_name}:\n\n{text}"
     )
     payload = {"model": model, "prompt": prompt, "stream": False,
-               "options": {"num_ctx": num_ctx}}
+               "options": {"num_ctx": num_ctx}, "keep_alive": keep_alive}
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -735,6 +745,54 @@ async def translate_chunk(session, text, src, tgt, model, url,
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY * attempt)
     raise Exception(f"Failed after {MAX_RETRIES} attempts: {last_err}")
+
+
+BATCH_SEPARATOR = "\n---SEGMENT_BREAK---\n"
+
+async def translate_batch_ollama(session, texts, src, tgt, model, url,
+                                 num_ctx=DEFAULT_NUM_CTX, keep_alive=DEFAULT_KEEP_ALIVE):
+    """Translate multiple text segments in a single Ollama request using separators."""
+    src_name = LANG_EN.get(src, src)
+    tgt_name = LANG_EN.get(tgt, tgt)
+    combined = BATCH_SEPARATOR.join(texts)
+    prompt = (
+        f"You are a professional {src_name} to {tgt_name} translator. "
+        f"Produce only the {tgt_name} translation, no explanations or commentary.\n"
+        f"The text below contains {len(texts)} segments separated by '---SEGMENT_BREAK---'.\n"
+        f"Translate each segment and keep the same '---SEGMENT_BREAK---' separators in your output.\n"
+        f"Do NOT add numbering, labels, or any extra text.\n\n"
+        f"Translate the following {src_name} text into {tgt_name}:\n\n{combined}"
+    )
+    payload = {"model": model, "prompt": prompt, "stream": False,
+               "options": {"num_ctx": num_ctx}, "keep_alive": keep_alive}
+    last_err = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            async with session.post(f"{url}/api/generate", json=payload,
+                                    timeout=aiohttp.ClientTimeout(total=600)) as resp:
+                if resp.status != 200:
+                    err = await resp.text()
+                    raise Exception(f"HTTP {resp.status}: {err[:200]}")
+                data = await resp.json()
+                result = data.get("response", "").strip()
+                if not result:
+                    raise Exception("Empty response from model")
+                # Split result back into segments
+                parts = re.split(r'\s*---SEGMENT_BREAK---\s*', result)
+                # If model returned wrong number of parts, fall back
+                if len(parts) != len(texts):
+                    # Try to salvage: if we got more, merge extras; if fewer, pad
+                    if len(parts) > len(texts):
+                        parts = parts[:len(texts)]
+                    else:
+                        while len(parts) < len(texts):
+                            parts.append("")
+                return [p.strip() for p in parts], attempt
+        except Exception as e:
+            last_err = e
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY * attempt)
+    raise Exception(f"Batch failed after {MAX_RETRIES} attempts: {last_err}")
 
 # ============================================================
 # Translation Pipeline
@@ -861,19 +919,19 @@ async def run_pipeline(job: TranslationJob):
             job.current_step = "Splitting into translation chunks..."
             job.progress = 10
             emit(job)
-            chunks_to_translate = create_chunks(paragraphs)
+            chunks_to_translate = create_chunks(paragraphs, max_chars=job.chunk_size)
             job.total_chunks = len(chunks_to_translate)
             job.translated_chunks = [""] * len(chunks_to_translate)
             job.add_event("info", "Chunking complete",
-                          f"{len(chunks_to_translate)} chunks")
+                          f"{len(chunks_to_translate)} chunks (max {job.chunk_size} chars/chunk)")
 
         engine_info = f"engine={job.engine}"
         if job.engine == 'libretranslate':
             engine_info += f", url={job.libretranslate_url}"
         else:
-            engine_info += f", model={job.model}, num_ctx={job.num_ctx}"
+            engine_info += f", model={job.model}, num_ctx={job.num_ctx}, batch={job.batch_size}"
         job.add_event("info", "Pipeline config",
-                      f"concurrency={job.concurrency}, {engine_info}")
+                      f"concurrency={job.concurrency}, keep_alive={job.keep_alive}, {engine_info}")
         emit(job)
 
         # --- TRANSLATE (parallel) ---
@@ -906,54 +964,141 @@ async def run_pipeline(job: TranslationJob):
 
             semaphore = asyncio.Semaphore(job.concurrency)
             lock = asyncio.Lock()
+            total_segs = len(chunks_to_translate)
 
-            async def translate_one(i, chunk):
-                if job.cancelled:
-                    return
-                async with semaphore:
+            # Decide whether to use batching (Ollama only, batch_size > 1)
+            use_batching = (not use_libretranslate) and job.batch_size > 1
+
+            if use_batching:
+                # --- BATCH MODE (Ollama) ---
+                batch_sz = job.batch_size
+                batches = []
+                for bi in range(0, total_segs, batch_sz):
+                    batch_chunks = chunks_to_translate[bi:bi+batch_sz]
+                    batches.append((bi, batch_chunks))
+                job.add_event("info", "Batch mode enabled",
+                              f"{len(batches)} batches of up to {batch_sz} segments")
+                emit(job)
+
+                async def translate_batch(batch_start, batch_chunks):
                     if job.cancelled:
                         return
-                    n = i + 1
-                    async with lock:
-                        engine_label = "LibreTranslate" if use_libretranslate else "Ollama"
-                        job.current_step = f"[{engine_label}] Translating segment {n}/{len(chunks_to_translate)} ({chunk['char_count']} chars)..."
-                        job.progress = 12 + (78 * job.completed_chunks / len(chunks_to_translate))
-                        emit(job)
-                    try:
-                        if use_libretranslate:
-                            translated, attempts = await translate_chunk_libretranslate(
-                                session, chunk["text"], job.source_lang, job.target_lang,
-                                job.libretranslate_url
-                            )
-                        else:
-                            translated, attempts = await translate_chunk(
-                                session, chunk["text"], job.source_lang, job.target_lang,
-                                job.model, job.ollama_url, num_ctx=job.num_ctx
-                            )
-                        job.translated_chunks[i] = translated
+                    async with semaphore:
+                        if job.cancelled:
+                            return
+                        indices = list(range(batch_start, batch_start + len(batch_chunks)))
+                        batch_num = batch_start // batch_sz + 1
+                        total_batch_chars = sum(c["char_count"] for c in batch_chunks)
                         async with lock:
-                            job.completed_chunks += 1
-                            job.translated_chars += len(translated)
-                            job.progress = 12 + (78 * job.completed_chunks / len(chunks_to_translate))
-                            if attempts > 1:
-                                job.retried_chunks += 1
-                                job.add_event("warning", f"Segment {n}/{len(chunks_to_translate)} OK after {attempts} attempts",
-                                              f"{chunk['char_count']}\u2192{len(translated)} chars")
-                            else:
-                                job.add_event("success", f"Segment {n}/{len(chunks_to_translate)} translated",
-                                              f"{chunk['char_count']}\u2192{len(translated)} chars")
+                            job.current_step = f"[Ollama] Batch {batch_num}/{len(batches)} ({len(batch_chunks)} seg, {total_batch_chars} chars)..."
+                            job.progress = 12 + (78 * job.completed_chunks / total_segs)
                             emit(job)
-                    except Exception as e:
-                        async with lock:
-                            job.failed_chunks += 1
-                            job.completed_chunks += 1
-                            job.translated_chunks[i] = f"[TRANSLATION ERROR: {e}]"
-                            job.progress = 12 + (78 * job.completed_chunks / len(chunks_to_translate))
-                            job.add_event("error", f"Segment {n}/{len(chunks_to_translate)} FAILED", str(e))
-                            emit(job)
+                        try:
+                            texts = [c["text"] for c in batch_chunks]
+                            results, attempts = await translate_batch_ollama(
+                                session, texts, job.source_lang, job.target_lang,
+                                job.model, job.ollama_url, num_ctx=job.num_ctx,
+                                keep_alive=job.keep_alive
+                            )
+                            async with lock:
+                                for k, (idx, chunk) in enumerate(zip(indices, batch_chunks)):
+                                    translated = results[k] if k < len(results) else ""
+                                    job.translated_chunks[idx] = translated
+                                    job.completed_chunks += 1
+                                    job.translated_chars += len(translated)
+                                if attempts > 1:
+                                    job.retried_chunks += 1
+                                    job.add_event("warning", f"Batch {batch_num}/{len(batches)} OK after {attempts} attempts",
+                                                  f"{total_batch_chars}\u2192{sum(len(r) for r in results)} chars")
+                                else:
+                                    job.add_event("success", f"Batch {batch_num}/{len(batches)} translated",
+                                                  f"{total_batch_chars}\u2192{sum(len(r) for r in results)} chars")
+                                job.progress = 12 + (78 * job.completed_chunks / total_segs)
+                                emit(job)
+                        except Exception as e:
+                            # Fallback: translate individually
+                            async with lock:
+                                job.add_event("warning", f"Batch {batch_num} failed, falling back to individual", str(e))
+                                emit(job)
+                            for k, (idx, chunk) in enumerate(zip(indices, batch_chunks)):
+                                if job.cancelled:
+                                    return
+                                try:
+                                    translated, att = await translate_chunk(
+                                        session, chunk["text"], job.source_lang, job.target_lang,
+                                        job.model, job.ollama_url, num_ctx=job.num_ctx,
+                                        keep_alive=job.keep_alive
+                                    )
+                                    job.translated_chunks[idx] = translated
+                                    async with lock:
+                                        job.completed_chunks += 1
+                                        job.translated_chars += len(translated)
+                                        job.progress = 12 + (78 * job.completed_chunks / total_segs)
+                                        job.add_event("success", f"Segment {idx+1}/{total_segs} translated (fallback)",
+                                                      f"{chunk['char_count']}\u2192{len(translated)} chars")
+                                        emit(job)
+                                except Exception as e2:
+                                    async with lock:
+                                        job.failed_chunks += 1
+                                        job.completed_chunks += 1
+                                        job.translated_chunks[idx] = f"[TRANSLATION ERROR: {e2}]"
+                                        job.progress = 12 + (78 * job.completed_chunks / total_segs)
+                                        job.add_event("error", f"Segment {idx+1}/{total_segs} FAILED", str(e2))
+                                        emit(job)
 
-            tasks = [translate_one(i, chunk) for i, chunk in enumerate(chunks_to_translate)]
-            await asyncio.gather(*tasks)
+                tasks = [translate_batch(bi, bc) for bi, bc in batches]
+                await asyncio.gather(*tasks)
+
+            else:
+                # --- INDIVIDUAL MODE (LibreTranslate or batch_size=1) ---
+                async def translate_one(i, chunk):
+                    if job.cancelled:
+                        return
+                    async with semaphore:
+                        if job.cancelled:
+                            return
+                        n = i + 1
+                        async with lock:
+                            engine_label = "LibreTranslate" if use_libretranslate else "Ollama"
+                            job.current_step = f"[{engine_label}] Translating segment {n}/{total_segs} ({chunk['char_count']} chars)..."
+                            job.progress = 12 + (78 * job.completed_chunks / total_segs)
+                            emit(job)
+                        try:
+                            if use_libretranslate:
+                                translated, attempts = await translate_chunk_libretranslate(
+                                    session, chunk["text"], job.source_lang, job.target_lang,
+                                    job.libretranslate_url
+                                )
+                            else:
+                                translated, attempts = await translate_chunk(
+                                    session, chunk["text"], job.source_lang, job.target_lang,
+                                    job.model, job.ollama_url, num_ctx=job.num_ctx,
+                                    keep_alive=job.keep_alive
+                                )
+                            job.translated_chunks[i] = translated
+                            async with lock:
+                                job.completed_chunks += 1
+                                job.translated_chars += len(translated)
+                                job.progress = 12 + (78 * job.completed_chunks / total_segs)
+                                if attempts > 1:
+                                    job.retried_chunks += 1
+                                    job.add_event("warning", f"Segment {n}/{total_segs} OK after {attempts} attempts",
+                                                  f"{chunk['char_count']}\u2192{len(translated)} chars")
+                                else:
+                                    job.add_event("success", f"Segment {n}/{total_segs} translated",
+                                                  f"{chunk['char_count']}\u2192{len(translated)} chars")
+                                emit(job)
+                        except Exception as e:
+                            async with lock:
+                                job.failed_chunks += 1
+                                job.completed_chunks += 1
+                                job.translated_chunks[i] = f"[TRANSLATION ERROR: {e}]"
+                                job.progress = 12 + (78 * job.completed_chunks / total_segs)
+                                job.add_event("error", f"Segment {n}/{total_segs} FAILED", str(e))
+                                emit(job)
+
+                tasks = [translate_one(i, chunk) for i, chunk in enumerate(chunks_to_translate)]
+                await asyncio.gather(*tasks)
 
             if job.cancelled:
                 job.status = JobStatus.CANCELLED
@@ -1101,7 +1246,10 @@ async def api_translate(
     num_ctx: int = Form(DEFAULT_NUM_CTX),
     engine: str = Form(DEFAULT_ENGINE),
     libretranslate_url: str = Form(DEFAULT_LIBRETRANSLATE_URL),
-    convert_to_pdf: str = Form("false")
+    convert_to_pdf: str = Form("false"),
+    batch_size: int = Form(DEFAULT_BATCH_SIZE),
+    keep_alive: str = Form(DEFAULT_KEEP_ALIVE),
+    chunk_size: int = Form(MAX_CHUNK_CHARS)
 ):
     # Use server-detected URL if client sends empty
     if not ollama_url:
@@ -1114,6 +1262,8 @@ async def api_translate(
         raise HTTPException(400, f"File too large (max {MAX_FILE_SIZE // 1024 // 1024}MB)")
     concurrency = max(1, min(concurrency, 10))
     num_ctx = max(512, min(num_ctx, 32768))
+    batch_size = max(1, min(batch_size, 10))
+    chunk_size = max(500, min(chunk_size, 10000))
     job_id = str(uuid.uuid4())[:8]
     client_ip = request.client.host if request.client else "unknown"
     engine = engine if engine in ('ollama', 'libretranslate') else 'ollama'
@@ -1121,7 +1271,8 @@ async def api_translate(
     job = TranslationJob(job_id, file.filename, source_lang, target_lang, model, ollama_url,
                          client_ip, concurrency=concurrency, num_ctx=num_ctx,
                          engine=engine, libretranslate_url=libretranslate_url,
-                         convert_to_pdf=pdf_convert)
+                         convert_to_pdf=pdf_convert, batch_size=batch_size,
+                         keep_alive=keep_alive, chunk_size=chunk_size)
     jobs[job_id] = job
     save_path = UPLOAD_DIR / f"{job_id}_{file.filename}"
     save_path.write_bytes(content)

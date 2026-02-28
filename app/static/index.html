@@ -637,17 +637,38 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
 
       <!-- Performance -->
       <div class="card">
-        <div class="card-header"><span class="card-title">Performanță</span></div>
+        <div class="card-header"><span class="card-title">Performan\u021b\u0103 \u0219i optimiz\u0103ri</span></div>
         <div class="card-body">
           <div class="form-group">
-            <label class="form-label">Concurrency (chunks în paralel)</label>
+            <label class="form-label">Concurrency (chunks \u00een paralel)</label>
             <input class="form-control" type="number" id="concurrency" value="3" min="1" max="10">
-            <div class="form-hint">Câte segmente se traduc simultan. Valori mai mari = mai rapid, dar mai multă memorie. Recomandat: 1-3 pentru GPU mic, 3-5 pentru GPU puternic.</div>
+            <div class="form-hint">C\u00e2te segmente se traduc simultan. Recomandat: 1-2 pentru Ollama (GPU), 5-10 pentru LibreTranslate.</div>
           </div>
           <div class="form-group">
             <label class="form-label">Context window (num_ctx)</label>
-            <input class="form-control" type="number" id="numCtx" value="2048" min="512" max="32768" step="256">
-            <div class="form-hint">Dimensiunea ferestrei de context. Valori mai mici = mai rapid. 2048 e optim pentru traducere. Creșteți doar dacă aveți paragrafe foarte lungi.</div>
+            <input class="form-control" type="number" id="numCtx" value="4096" min="512" max="32768" step="256">
+            <div class="form-hint">Dimensiunea ferestrei de context Ollama. 4096 e optim. Cre\u0219te\u021bi pentru documente cu paragrafe foarte lungi.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Dimensiune chunk (caractere per segment)</label>
+            <input class="form-control" type="number" id="chunkSize" value="3000" min="500" max="10000" step="500">
+            <div class="form-hint">C\u00e2te caractere per segment de tradus. Mai mare = mai pu\u021bine request-uri = mai rapid. Recomandat: 2000-5000.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Batch size (segmente per request Ollama)</label>
+            <input class="form-control" type="number" id="batchSize" value="3" min="1" max="10">
+            <div class="form-hint">C\u00e2te segmente se trimit \u00eentr-un singur request la Ollama. 1 = f\u0103r\u0103 batching. 3-5 = optim. Reduce overhead-ul de prompt. Nu se aplic\u0103 la LibreTranslate.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Keep alive (model \u00een memorie)</label>
+            <select class="form-control" id="keepAlive">
+              <option value="5m">5 minute</option>
+              <option value="15m">15 minute</option>
+              <option value="30m" selected>30 minute (recomandat)</option>
+              <option value="1h">1 or\u0103</option>
+              <option value="0">Dezactivat (desc\u0103rcare imediat\u0103)</option>
+            </select>
+            <div class="form-hint">C\u00e2t timp Ollama p\u0103streaz\u0103 modelul \u00een VRAM dup\u0103 ultimul request. Mai mult = pornire mai rapid\u0103 la urm\u0103torul job.</div>
           </div>
         </div>
       </div>
@@ -827,6 +848,9 @@ function init() {
   if (localStorage.getItem('customModel')) $('customModel').value = localStorage.getItem('customModel');
   if (localStorage.getItem('concurrency')) $('concurrency').value = localStorage.getItem('concurrency');
   if (localStorage.getItem('numCtx')) $('numCtx').value = localStorage.getItem('numCtx');
+  if (localStorage.getItem('chunkSize')) $('chunkSize').value = localStorage.getItem('chunkSize');
+  if (localStorage.getItem('batchSize')) $('batchSize').value = localStorage.getItem('batchSize');
+  if (localStorage.getItem('keepAlive')) $('keepAlive').value = localStorage.getItem('keepAlive');
   if (localStorage.getItem('notifEnabled') === 'false') $('notifEnabled').checked = false;
   if (localStorage.getItem('convertToPdf') === 'true') $('convertToPdf').checked = true;
   if (localStorage.getItem('engine')) {
@@ -1041,6 +1065,9 @@ async function startTranslation() {
     formData.append('engine', engine);
     formData.append('libretranslate_url', libreUrl);
     formData.append('convert_to_pdf', $('convertToPdf').checked ? 'true' : 'false');
+    formData.append('batch_size', parseInt($('batchSize').value) || 3);
+    formData.append('keep_alive', $('keepAlive').value || '30m');
+    formData.append('chunk_size', parseInt($('chunkSize').value) || 3000);
     formData.append('file', file);
 
     try {
@@ -1356,15 +1383,34 @@ function renderJobs(jobsList) {
       `<div class="event-line"><span class="event-time">${ev.time}</span><span class="event-type ${ev.type}">${icons[ev.type]||'\u00b7'}</span><span class="event-msg"><strong>${ev.message}</strong> ${ev.detail ? '\u2014 '+ev.detail : ''}</span></div>`
     ).join('');
 
-    const statsRow = `<div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;padding:0 18px 8px">
-      <span style="font-size:12px;color:var(--text3)">Caractere: <strong style="color:var(--text2)">${chars}/${totalChars}</strong></span>
-      <span style="font-size:12px;color:var(--text3)">Timp: <strong style="color:var(--text2)">${elapsed}</strong></span>
-      <span style="font-size:12px;color:var(--text3)">Segmente: <strong style="color:var(--text2)">${live.completed_chunks||j.completed_chunks}/${live.total_chunks||j.total_chunks}</strong></span>
-      ${live.failed_chunks ? `<span style="font-size:12px;color:var(--text3)">E\u0219uate: <strong style="color:var(--red)">${live.failed_chunks}</strong></span>` : ''}
-      ${live.retried_chunks ? `<span style="font-size:12px;color:var(--text3)">Re\u00eencerc\u0103ri: <strong style="color:var(--amber)">${live.retried_chunks}</strong></span>` : ''}
+    const currentStepLine = isActive && (live.current_step || j.current_step)
+      ? `<div style="font-size:11px;color:var(--primary);margin-top:4px;font-style:italic">${live.current_step || j.current_step}</div>`
+      : '';
+
+    const statsRow = `<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;padding:0 18px 8px;width:100%">
+      <div style="min-width:110px;text-align:center;padding:8px 12px;background:var(--bg3);border-radius:8px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Caractere</div>
+        <div style="font-size:14px;font-weight:700;color:var(--text)">${chars} / ${totalChars}</div>
+      </div>
+      <div style="min-width:110px;text-align:center;padding:8px 12px;background:var(--bg3);border-radius:8px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Timp</div>
+        <div style="font-size:14px;font-weight:700;color:var(--text)">${elapsed}</div>
+      </div>
+      <div style="min-width:110px;text-align:center;padding:8px 12px;background:var(--bg3);border-radius:8px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Segmente</div>
+        <div style="font-size:14px;font-weight:700;color:var(--text)">${live.completed_chunks||j.completed_chunks} / ${live.total_chunks||j.total_chunks}</div>
+      </div>
+      ${live.failed_chunks ? `<div style="min-width:90px;text-align:center;padding:8px 12px;background:var(--red-l);border-radius:8px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:2px">E\u0219uate</div>
+        <div style="font-size:14px;font-weight:700;color:var(--red)">${live.failed_chunks}</div>
+      </div>` : ''}
+      ${live.retried_chunks ? `<div style="min-width:90px;text-align:center;padding:8px 12px;background:var(--amber-l);border-radius:8px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Re\u00eencerc\u0103ri</div>
+        <div style="font-size:14px;font-weight:700;color:var(--amber)">${live.retried_chunks}</div>
+      </div>` : ''}
     </div>`;
 
-    const logPanel = (isActive || events.length) ? `<div style="padding:0 18px 12px">
+    const logPanel = (isActive || events.length) ? `<div style="padding:0 18px 12px;width:100%">
       <details data-jobs-id="${j.job_id}" ${openJobPanels.has(j.job_id) ? 'open' : ''}>
         <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">Jurnal de evenimente (${events.length})</summary>
         <div class="event-log" style="max-height:200px">${eventsHtml}</div>
@@ -1372,15 +1418,16 @@ function renderJobs(jobsList) {
     </div>` : '';
 
     return `<div class="job-item" style="flex-wrap:wrap">
-      <div class="job-info">
+      <div class="job-info" style="min-width:200px">
         <div class="job-name">${j.filename}</div>
         <div class="job-meta">${j.source_lang}\u2192${j.target_lang} \u00b7 ${engineLabel} \u00b7 ${j.client_ip} \u00b7 ${j.created_at.substring(11,19)}</div>
+        ${currentStepLine}
       </div>
-      <div class="job-progress">
+      <div class="job-progress" style="width:140px;flex-shrink:0">
         <div class="progress"><div class="progress-fill ${j.status==='completed'?'done':j.status==='failed'?'error':''}" style="width:${(live.progress||j.progress)}%"></div></div>
-        <div style="font-size:11px;color:var(--text3);margin-top:2px">${live.completed_chunks||j.completed_chunks}/${live.total_chunks||j.total_chunks} seg. \u00b7 ${Math.round(live.progress||j.progress)}%</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">${Math.round(live.progress||j.progress)}%</div>
       </div>
-      <span class="badge ${color}"><span class="badge-dot ${isActive?'pulse':''}"></span> ${isActive ? (live.current_step || j.status) : j.status}</span>
+      <span class="badge ${color}"><span class="badge-dot ${isActive?'pulse':''}"></span> ${j.status}</span>
       <div class="job-actions">
         ${isActive?`<button class="btn btn-sm btn-danger" onclick="cancelJob('${j.job_id}')" title="Anuleaz\u0103">\u25a0</button>`:''}
         ${j.status==='completed'?`<button class="btn btn-sm btn-secondary" onclick="window.open('/api/jobs/${j.job_id}/download')" title="Descarc\u0103">\u2b07</button>`:''}
@@ -1550,11 +1597,13 @@ function updateDashboard(d) {
 }
 
 function fmtDuration(s) {
+  s = Math.round(s);
   if (s < 60) return s + 's';
   if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
   const h = Math.floor(s/3600);
   const m = Math.floor((s%3600)/60);
-  return h + 'h ' + m + 'm';
+  const sec = s % 60;
+  return h + 'h ' + m + 'm ' + sec + 's';
 }
 
 // ============================================================
@@ -1573,6 +1622,9 @@ function saveSettings() {
   localStorage.setItem('customModel', $('customModel').value);
   localStorage.setItem('concurrency', $('concurrency').value);
   localStorage.setItem('numCtx', $('numCtx').value);
+  localStorage.setItem('chunkSize', $('chunkSize').value);
+  localStorage.setItem('batchSize', $('batchSize').value);
+  localStorage.setItem('keepAlive', $('keepAlive').value);
   localStorage.setItem('notifEnabled', $('notifEnabled').checked);
   localStorage.setItem('convertToPdf', $('convertToPdf').checked);
 }
