@@ -173,29 +173,17 @@ echo    Port web:   !USER_PORT!
 echo    Ollama:     !USER_OLLAMA!
 echo.
 
-:: Build the podman run command - write to temp file to avoid batch escaping issues
-set "TEMP_CMD=%TEMP%\traducator_start_cmd.bat"
-echo @echo off> "!TEMP_CMD!"
+:: Run podman - use goto to avoid if/else block parsing issues
+if not "!USER_OLLAMA!"=="auto" goto START_CUSTOM_URL
 
-:: Use auto or explicit URL
-if "!USER_OLLAMA!"=="auto" (
-    echo podman run -d --name %CONTAINER_NAME% -p !USER_PORT!:8080 -e OLLAMA_URL=auto -e PORT=8080 --restart unless-stopped %IMAGE_NAME%>> "!TEMP_CMD!"
-) else (
-    echo podman run -d --name %CONTAINER_NAME% -p !USER_PORT!:8080 -e "OLLAMA_URL=!USER_OLLAMA!" -e PORT=8080 --restart unless-stopped %IMAGE_NAME%>> "!TEMP_CMD!"
-)
+podman run -d --name %CONTAINER_NAME% -p !USER_PORT!:8080 -e OLLAMA_URL=auto -e PORT=8080 --restart unless-stopped %IMAGE_NAME%
+goto START_CHECK_RESULT
 
-call "!TEMP_CMD!"
-set "RUN_RESULT=!ERRORLEVEL!"
-del "!TEMP_CMD!" >nul 2>&1
+:START_CUSTOM_URL
+podman run -d --name %CONTAINER_NAME% -p !USER_PORT!:8080 -e "OLLAMA_URL=!USER_OLLAMA!" -e PORT=8080 --restart unless-stopped %IMAGE_NAME%
 
-if not "!RUN_RESULT!"=="0" (
-    echo.
-    echo  EROARE: Containerul nu a pornit!
-    echo  Asigura-te ca imaginea este incarcata (optiunea 1).
-    echo.
-    pause
-    goto MENU
-)
+:START_CHECK_RESULT
+if !ERRORLEVEL! NEQ 0 goto START_FAILED
 
 echo.
 echo  Containerul a pornit! Se asteapta initializarea serviciilor...
@@ -238,6 +226,14 @@ echo.
 set /p "OPEN_BROWSER=  Deschid browserul? (D/N): "
 if /i "!OPEN_BROWSER!"=="D" start "" "http://localhost:!USER_PORT!"
 
+echo.
+pause
+goto MENU
+
+:START_FAILED
+echo.
+echo  EROARE: Containerul nu a pornit!
+echo  Asigura-te ca imaginea este incarcata - optiunea 1.
 echo.
 pause
 goto MENU
