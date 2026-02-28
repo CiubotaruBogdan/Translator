@@ -170,31 +170,13 @@ echo  ============================================================
 echo   EXPORT IMAGINE .TAR
 echo  ============================================================
 echo.
-echo  Se exporta %IMAGE_NAME% in %TAR_NAME% ...
-echo  (Poate dura cateva minute)
+echo  Se lanseaza exportul in fereastra noua...
+echo  (Aceasta fereastra revine la meniu)
 echo.
 
-podman save %IMAGE_NAME% -o "%TAR_NAME%"
+start "Traducator - Export" cmd /c "chcp 65001 >nul 2>&1 && echo. && echo  ============================================================ && echo   EXPORT IMAGINE .TAR && echo  ============================================================ && echo. && echo  Se exporta %IMAGE_NAME% in %TAR_NAME% ... && echo  (Poate dura cateva minute) && echo. && podman save %IMAGE_NAME% -o "%CD%\%TAR_NAME%" && ( echo. && echo  SUCCES: Imaginea a fost exportata! && echo  Fisier: %CD%\%TAR_NAME% && echo. && echo  Copiaza pe stick USB: && echo    - %TAR_NAME% && echo    - traducator_manager.bat && echo    - TUTORIAL_DOCKER.md ) || ( echo. && echo  EROARE: Exportul a esuat! Asigura-te ca imaginea exista. ) && echo. && pause"
 
-if !ERRORLEVEL! NEQ 0 (
-    echo.
-    echo  EROARE: Exportul a esuat! Asigura-te ca imaginea exista (optiunea 1).
-) else (
-    echo.
-    echo  SUCCES: Imaginea a fost exportata!
-    for %%A in ("%TAR_NAME%") do (
-        set /a SIZE_MB=%%~zA / 1048576
-        echo  Fisier: %CD%\%TAR_NAME% (!SIZE_MB! MB^)
-    )
-    echo.
-    echo  Copiaza pe stick USB:
-    echo    - %TAR_NAME%
-    echo    - traducator_manager.bat
-    echo    - TUTORIAL_DOCKER.md
-)
-
-echo.
-pause
+timeout /t 2 >nul
 goto MENU
 
 :: ============================================================
@@ -223,32 +205,14 @@ if !ERRORLEVEL! NEQ 0 (
 )
 
 echo.
-echo  Pasul 2/2: Export .tar...
+echo  Pasul 2/2: Export .tar - se lanseaza in fereastra noua...
 echo.
 
-podman save %IMAGE_NAME% -o "%TAR_NAME%"
+start "Traducator - Export" cmd /c "chcp 65001 >nul 2>&1 && echo. && echo  ============================================================ && echo   PASUL 2/2: EXPORT .TAR && echo  ============================================================ && echo. && echo  Limbi incluse: !USER_LANGS! && echo. && echo  Se exporta %IMAGE_NAME% in %TAR_NAME% ... && echo  (Poate dura cateva minute) && echo. && podman save %IMAGE_NAME% -o "%CD%\%TAR_NAME%" && ( echo. && echo  ============================================================ && echo   TOTUL GATA! && echo  ============================================================ && echo. && echo  Fisier: %CD%\%TAR_NAME% && echo. && echo  Copiaza pe stick USB catre statia offline: && echo    - %TAR_NAME% && echo    - traducator_manager.bat && echo    - TUTORIAL_DOCKER.md ) || ( echo. && echo  EROARE: Exportul a esuat! ) && echo. && pause"
 
-if !ERRORLEVEL! NEQ 0 (
-    echo.
-    echo  EROARE: Exportul a esuat!
-) else (
-    echo.
-    echo  ============================================================
-    echo   TOTUL GATA!
-    echo  ============================================================
-    echo.
-    echo  Limbi incluse: !USER_LANGS!
-    for %%A in ("%TAR_NAME%") do (
-        set /a SIZE_MB=%%~zA / 1048576
-        echo  Fisier: %CD%\%TAR_NAME% (!SIZE_MB! MB^)
-    )
-    echo.
-    echo  Copiaza pe stick USB catre statia offline:
-    echo    - %TAR_NAME%
-    echo    - traducator_manager.bat
-    echo    - TUTORIAL_DOCKER.md
-)
-
+echo.
+echo  Exportul ruleaza in fereastra separata.
+echo  Constructia s-a finalizat cu succes.
 echo.
 pause
 goto MENU
