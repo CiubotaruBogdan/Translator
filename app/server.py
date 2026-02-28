@@ -1129,6 +1129,55 @@ async def api_translate(
     asyncio.create_task(run_pipeline(job))
     return {"job_id": job_id, "status": "queued"}
 
+
+from pydantic import BaseModel
+
+class TextTranslateRequest(BaseModel):
+    text: str
+    source_lang: str = "ro"
+    target_lang: str = "en"
+    engine: str = "ollama"
+    model: str = DEFAULT_MODEL
+    ollama_url: str = ""
+    libretranslate_url: str = DEFAULT_LIBRETRANSLATE_URL
+    num_ctx: int = DEFAULT_NUM_CTX
+
+@app.post("/api/translate-text")
+async def api_translate_text(req: TextTranslateRequest):
+    """Translate text directly (Google Translate style) without creating a job."""
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "Text is empty")
+    if len(text) > 50000:
+        raise HTTPException(400, "Text too long (max 50,000 characters)")
+
+    ollama_url = req.ollama_url or DEFAULT_OLLAMA_URL
+    engine = req.engine if req.engine in ('ollama', 'libretranslate') else 'ollama'
+    num_ctx = max(512, min(req.num_ctx, 32768))
+
+    logger.info(f"Text translate: {len(text)} chars, {req.source_lang}->{req.target_lang}, engine={engine}")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            if engine == 'libretranslate':
+                # For LibreTranslate, translate directly (handles chunking internally for short text)
+                translated, attempts = await translate_chunk_libretranslate(
+                    session, text, req.source_lang, req.target_lang, req.libretranslate_url
+                )
+            else:
+                # For Ollama, translate directly
+                translated, attempts = await translate_chunk(
+                    session, text, req.source_lang, req.target_lang,
+                    req.model, ollama_url, num_ctx=num_ctx
+                )
+
+        logger.info(f"Text translate complete: {len(translated)} chars, {attempts} attempt(s)")
+        return {"translated_text": translated, "engine": engine, "attempts": attempts}
+
+    except Exception as e:
+        logger.error(f"Text translate error: {e}")
+        raise HTTPException(500, f"Translation failed: {str(e)}")
+
 @app.get("/api/jobs")
 async def api_jobs():
     return {"jobs": [j.to_dict() for j in sorted(jobs.values(), key=lambda j: j.created_at, reverse=True)]}

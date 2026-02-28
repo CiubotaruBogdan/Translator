@@ -213,6 +213,30 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
 .active-jobs-panel{margin-top:16px}
 .active-job-card{margin-bottom:12px}
 
+/* Text Translate (Google Translate style) */
+.translate-panels{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;min-height:300px}
+.translate-panel{display:flex;flex-direction:column}
+.translate-panel-header{padding:10px 16px;background:var(--bg3);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;min-height:44px}
+.translate-panel-header select{border:none;background:transparent;font-size:14px;font-weight:600;color:var(--text);cursor:pointer;padding:4px 8px;border-radius:6px}
+.translate-panel-header select:hover{background:var(--bg)}
+.translate-panel-header select:focus{outline:none}
+.translate-panel-body{flex:1;position:relative}
+.translate-panel-body textarea{width:100%;height:100%;min-height:250px;border:none;background:var(--bg2);padding:16px;font-size:15px;line-height:1.6;color:var(--text);resize:none;font-family:inherit}
+.translate-panel-body textarea:focus{outline:none}
+.translate-panel-body .output-text{padding:16px;font-size:15px;line-height:1.6;color:var(--text);min-height:250px;background:var(--bg2);white-space:pre-wrap;word-wrap:break-word}
+.translate-panel-body .output-text.placeholder{color:var(--text3);font-style:italic}
+.translate-panel-footer{padding:8px 16px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg2)}
+.translate-panel-footer .char-count{font-size:11px;color:var(--text3)}
+.translate-panel-footer .copy-btn{background:none;border:none;cursor:pointer;color:var(--text3);padding:6px;border-radius:6px;display:flex;align-items:center;gap:4px;font-size:12px}
+.translate-panel-footer .copy-btn:hover{background:var(--bg3);color:var(--text)}
+.translate-panel-footer .copy-btn svg{width:14px;height:14px;fill:currentColor}
+.translate-divider{width:1px;background:var(--border)}
+.translate-actions{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:12px}
+@media(max-width:768px){
+  .translate-panels{grid-template-columns:1fr}
+  .translate-panel-body textarea,.translate-panel-body .output-text{min-height:180px}
+}
+
 /* Log entries */
 .log-entry{display:flex;gap:8px;padding:3px 6px;border-bottom:1px solid var(--border);line-height:1.5}
 .log-entry:hover{background:var(--bg3)}
@@ -257,9 +281,13 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
 
     </div>
     <div class="sidebar-nav">
-      <div class="nav-item active" data-page="translate" onclick="showPage('translate')">
+      <div class="nav-item active" data-page="textTranslate" onclick="showPage('textTranslate')">
         <svg viewBox="0 0 24 24"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
-        Traducere nouă
+        Traducere text
+      </div>
+      <div class="nav-item" data-page="translate" onclick="showPage('translate')">
+        <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+        Traducere documente
       </div>
       <div class="nav-item" data-page="jobs" onclick="showPage('jobs')">
         <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM7 10h2v7H7zm4-3h2v10h-2zm4 6h2v4h-2z"/></svg>
@@ -293,9 +321,71 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
   <!-- Content Area -->
   <div class="content">
 
-    <!-- ==================== PAGE: TRANSLATE ==================== -->
-    <div class="page active" id="page-translate">
-      <h2 class="page-title">Traducere nouă</h2>
+    <!-- ==================== PAGE: TEXT TRANSLATE ==================== -->
+    <div class="page active" id="page-textTranslate">
+      <h2 class="page-title">Traducere text</h2>
+
+      <!-- Language bar -->
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <select class="form-control" id="ttSourceLang" style="max-width:200px"></select>
+        <button class="swap-btn" onclick="swapTTLangs()" title="Inversează">
+          <svg viewBox="0 0 24 24"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
+        </button>
+        <select class="form-control" id="ttTargetLang" style="max-width:200px"></select>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+          <span class="badge blue" id="ttEngineBadge" style="font-size:11px;cursor:pointer" onclick="showPage('settings')" title="Click pentru a schimba motorul">Ollama</span>
+        </div>
+      </div>
+
+      <!-- Two-panel translator -->
+      <div class="translate-panels">
+        <!-- Input panel -->
+        <div class="translate-panel">
+          <div class="translate-panel-header">
+            <span style="font-size:13px;font-weight:600;color:var(--text2)">Text original</span>
+            <button class="copy-btn" onclick="$('ttInput').value='';$('ttOutput').innerHTML='<span class=placeholder>Traducerea va apărea aici...</span>';$('ttInputCount').textContent='0 caractere'" title="Șterge">
+              <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+            </button>
+          </div>
+          <div class="translate-panel-body">
+            <textarea id="ttInput" placeholder="Introduceți textul de tradus..." oninput="updateTTCharCount()"></textarea>
+          </div>
+          <div class="translate-panel-footer">
+            <span class="char-count" id="ttInputCount">0 caractere</span>
+          </div>
+        </div>
+
+        <!-- Output panel -->
+        <div class="translate-panel" style="border-left:1px solid var(--border)">
+          <div class="translate-panel-header">
+            <span style="font-size:13px;font-weight:600;color:var(--text2)">Traducere</span>
+            <button class="copy-btn" onclick="copyTTOutput()" title="Copiază">
+              <svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+              <span>Copiază</span>
+            </button>
+          </div>
+          <div class="translate-panel-body">
+            <div class="output-text placeholder" id="ttOutput">Traducerea va apărea aici...</div>
+          </div>
+          <div class="translate-panel-footer">
+            <span class="char-count" id="ttOutputCount"></span>
+            <span id="ttTranslateTime" style="font-size:11px;color:var(--text3)"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Translate button -->
+      <div class="translate-actions">
+        <button class="btn btn-primary" id="ttTranslateBtn" onclick="translateText()">
+          <svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
+          Traduce
+        </button>
+      </div>
+    </div>
+
+    <!-- ==================== PAGE: TRANSLATE (DOCUMENTS) ==================== -->
+    <div class="page" id="page-translate">
+      <h2 class="page-title">Traducere documente</h2>
 
       <!-- Language selection -->
       <div class="card">
@@ -333,22 +423,11 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         </div>
       </div>
 
-      <!-- Or paste text -->
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">Sau introduceți text direct</span>
-          <span id="directCharCount" style="font-size:12px;color:var(--text3)">0 caractere</span>
-        </div>
-        <div class="card-body">
-          <textarea class="form-control" id="directText" rows="5" placeholder="Lipiți textul aici..." style="resize:vertical;font-family:inherit"></textarea>
-        </div>
-      </div>
-
       <!-- Translate button -->
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
         <button class="btn btn-primary" id="translateBtn" onclick="startTranslation()">
           <svg viewBox="0 0 24 24"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
-          Traduce
+          Traduce documente
         </button>
       </div>
 
@@ -685,6 +764,7 @@ const $ = id => document.getElementById(id);
 // INIT
 // ============================================================
 function populateLanguages(langs) {
+  // Document translate dropdowns
   const src = $('sourceLang'), tgt = $('targetLang');
   const savedSrc = src.value || localStorage.getItem('sourceLang') || 'ro';
   const savedTgt = tgt.value || localStorage.getItem('targetLang') || 'en';
@@ -696,6 +776,21 @@ function populateLanguages(langs) {
   });
   src.value = savedSrc;
   tgt.value = savedTgt;
+
+  // Text translate dropdowns
+  const ttSrc = $('ttSourceLang'), ttTgt = $('ttTargetLang');
+  if (ttSrc && ttTgt) {
+    const savedTTSrc = ttSrc.value || localStorage.getItem('ttSourceLang') || 'ro';
+    const savedTTTgt = ttTgt.value || localStorage.getItem('ttTargetLang') || 'en';
+    ttSrc.innerHTML = '';
+    ttTgt.innerHTML = '';
+    langs.forEach(l => {
+      ttSrc.add(new Option(l.n, l.c));
+      ttTgt.add(new Option(l.n, l.c));
+    });
+    ttSrc.value = savedTTSrc;
+    ttTgt.value = savedTTTgt;
+  }
 }
 
 function init() {
@@ -743,9 +838,9 @@ function init() {
   checkLibreOffice();  // Check LibreOffice availability
 
   setupUpload();
-  $('directText').addEventListener('input', () => {
-    $('directCharCount').textContent = $('directText').value.length + ' caractere';
-  });
+
+  // Update engine badge on text translate page
+  updateTTEngineBadge();
 
   connectWS();
   loadJobs();
@@ -783,6 +878,8 @@ function onEngineChange() {
       }
     }).catch(() => {});
   }
+  // Update text translate engine badge
+  updateTTEngineBadge();
 }
 
 async function testLibreConnection() {
@@ -865,8 +962,6 @@ function addFiles(files) {
   }
   if (added > 0) {
     renderFileList();
-    $('directText').value = '';
-    $('directCharCount').textContent = '0 caractere';
   }
 }
 
@@ -916,10 +1011,8 @@ function fmtBytes(b) {
 // TRANSLATION (multiple files)
 // ============================================================
 async function startTranslation() {
-  const directText = $('directText').value.trim();
-
-  if (!selectedFiles.length && !directText) {
-    toast('Încărcați documente sau introduceți text', 'error');
+  if (!selectedFiles.length) {
+    toast('Încărcați cel puțin un document', 'error');
     return;
   }
 
@@ -936,13 +1029,7 @@ async function startTranslation() {
   $('translateBtn').disabled = true;
   $('translateBtn').innerHTML = '<span class="spinner"></span> Se trimite...';
 
-  let filesToSend = [];
-  if (selectedFiles.length) {
-    filesToSend = [...selectedFiles];
-  } else {
-    const blob = new Blob([directText], { type: 'text/plain' });
-    filesToSend = [new File([blob], 'text_direct.txt', { type: 'text/plain' })];
-  }
+  let filesToSend = [...selectedFiles];
 
   let submitted = 0;
   for (const file of filesToSend) {
@@ -977,11 +1064,9 @@ async function startTranslation() {
   // Reset upload zone
   selectedFiles = [];
   renderFileList();
-  $('directText').value = '';
-  $('directCharCount').textContent = '0 caractere';
 
   $('translateBtn').disabled = false;
-  $('translateBtn').innerHTML = '<svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg> Traduce';
+  $('translateBtn').innerHTML = '<svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg> Traduce documente';
 
   if (submitted > 0) {
     const msg = submitted === 1
@@ -1417,6 +1502,112 @@ function saveSettings() {
 function swapLangs() {
   const s = $('sourceLang'), t = $('targetLang');
   const tmp = s.value; s.value = t.value; t.value = tmp;
+}
+
+function swapTTLangs() {
+  const s = $('ttSourceLang'), t = $('ttTargetLang');
+  const tmp = s.value; s.value = t.value; t.value = tmp;
+}
+
+function updateTTCharCount() {
+  const len = $('ttInput').value.length;
+  $('ttInputCount').textContent = len + ' caractere';
+}
+
+function updateTTEngineBadge() {
+  const engine = ($('engineSelect') ? $('engineSelect').value : null) || localStorage.getItem('engine') || 'ollama';
+  const badge = $('ttEngineBadge');
+  if (badge) {
+    badge.textContent = engine === 'ollama' ? 'Ollama' : 'LibreTranslate';
+    badge.className = engine === 'ollama' ? 'badge blue' : 'badge green';
+    badge.style.fontSize = '11px';
+    badge.style.cursor = 'pointer';
+  }
+}
+
+function copyTTOutput() {
+  const el = $('ttOutput');
+  if (!el || el.classList.contains('placeholder')) return;
+  const text = el.textContent || el.innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    toast('Traducerea a fost copiata!', 'success');
+  }).catch(() => {
+    // Fallback
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast('Traducerea a fost copiata!', 'success');
+  });
+}
+
+async function translateText() {
+  const text = $('ttInput').value.trim();
+  if (!text) {
+    toast('Introduceti textul de tradus', 'error');
+    return;
+  }
+
+  const srcLang = $('ttSourceLang').value;
+  const tgtLang = $('ttTargetLang').value;
+  const engine = ($('engineSelect') ? $('engineSelect').value : null) || localStorage.getItem('engine') || 'ollama';
+  const model = ($('customModel') ? $('customModel').value.trim() : '') || ($('modelSelect') ? $('modelSelect').value : '') || 'gemma3:4b';
+  const ollamaUrl = ($('ollamaUrl') ? $('ollamaUrl').value.trim() : '') || '';
+  const libreUrl = ($('libreUrl') ? $('libreUrl').value.trim() : '') || 'http://localhost:5000';
+  const numCtx = parseInt(($('numCtx') ? $('numCtx').value : '2048')) || 2048;
+
+  // Save language preferences
+  localStorage.setItem('ttSourceLang', srcLang);
+  localStorage.setItem('ttTargetLang', tgtLang);
+
+  const btn = $('ttTranslateBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Se traduce...';
+  $('ttOutput').innerHTML = '<span class="placeholder">Se traduce...</span>';
+  $('ttOutputCount').textContent = '';
+  $('ttTranslateTime').textContent = '';
+
+  const startTime = Date.now();
+
+  try {
+    const resp = await fetch('/api/translate-text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: text,
+        source_lang: srcLang,
+        target_lang: tgtLang,
+        engine: engine,
+        model: model,
+        ollama_url: ollamaUrl,
+        libretranslate_url: libreUrl,
+        num_ctx: numCtx
+      })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.detail || 'Eroare la traducere');
+    }
+
+    const data = await resp.json();
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    $('ttOutput').classList.remove('placeholder');
+    $('ttOutput').textContent = data.translated_text;
+    $('ttOutputCount').textContent = data.translated_text.length + ' caractere';
+    $('ttTranslateTime').textContent = elapsed + 's';
+
+  } catch (e) {
+    $('ttOutput').innerHTML = '<span style="color:var(--red)">' + escHtml(e.message) + '</span>';
+    $('ttOutput').classList.remove('placeholder');
+    toast('Eroare: ' + e.message, 'error');
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '<svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg> Traduce';
 }
 
 function toggleTheme() {
