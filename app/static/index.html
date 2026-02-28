@@ -132,6 +132,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
 .job-meta{font-size:12px;color:var(--text3);margin-top:2px}
 .job-stats-center{display:flex;gap:10px;justify-self:center;align-items:center;flex-wrap:wrap;justify-content:center}
 .job-stat-card{min-width:100px;width:120px;text-align:center;padding:8px 12px;background:var(--bg3);border-radius:8px}
+.job-stat-card.wide{width:250px;min-width:200px}
 .job-stat-card.error{background:var(--red-l)}
 .job-stat-card.warning{background:var(--amber-l)}
 .job-stat-label{font-size:11px;color:var(--text3);margin-bottom:2px}
@@ -1455,8 +1456,7 @@ function renderJobs(jobsList) {
         ${currentStepLine}
       </div>
       <div class="job-stats-center">
-        <div class="job-stat-card"><div class="job-stat-label">Caractere</div><div class="job-stat-value">${chars} / ${totalChars}</div></div>
-        <div class="job-stat-card"><div class="job-stat-label">Traducere</div><div class="job-stat-value">${elapsed}</div></div>
+        <div class="job-stat-card wide"><div class="job-stat-label">Caractere</div><div class="job-stat-value">${chars} / ${totalChars}</div></div>
         <div class="job-stat-card"><div class="job-stat-label">Segmente</div><div class="job-stat-value">${live.completed_chunks||j.completed_chunks} / ${live.total_chunks||j.total_chunks}</div></div>
         <div class="job-stat-card"><div class="job-stat-label">Timp total</div><div class="job-stat-value">${runningTime}</div></div>
         ${extraCards}
