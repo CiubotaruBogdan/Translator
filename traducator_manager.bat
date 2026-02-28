@@ -155,11 +155,11 @@ set /p "USER_PORT=  Port web [%DEFAULT_PORT%]: "
 if "!USER_PORT!"=="" set "USER_PORT=%DEFAULT_PORT%"
 
 echo.
-echo  Doresti sa specifici manual adresa Ollama?
+echo  Introdu adresa masinii pe care ruleaza Ollama.
 echo  (Apasa Enter pentru detectie automata - recomandat)
 echo.
 set "USER_OLLAMA="
-set /p "USER_OLLAMA=  Ollama URL [auto]: "
+set /p "USER_OLLAMA=  Ollama URL [http://ADRESA_IP_A_MASINII_CU_OLLAMA:11434]: "
 if "!USER_OLLAMA!"=="" set "USER_OLLAMA=auto"
 
 echo.
