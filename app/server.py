@@ -1155,7 +1155,7 @@ async def api_translate_text(req: TextTranslateRequest):
     engine = req.engine if req.engine in ('ollama', 'libretranslate') else 'ollama'
     num_ctx = max(512, min(req.num_ctx, 32768))
 
-    logger.info(f"Text translate: {len(text)} chars, {req.source_lang}->{req.target_lang}, engine={engine}")
+    app_logger.info(f"Text translate: {len(text)} chars, {req.source_lang}->{req.target_lang}, engine={engine}")
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -1171,11 +1171,11 @@ async def api_translate_text(req: TextTranslateRequest):
                     req.model, ollama_url, num_ctx=num_ctx
                 )
 
-        logger.info(f"Text translate complete: {len(translated)} chars, {attempts} attempt(s)")
+        app_logger.info(f"Text translate complete: {len(translated)} chars, {attempts} attempt(s)")
         return {"translated_text": translated, "engine": engine, "attempts": attempts}
 
     except Exception as e:
-        logger.error(f"Text translate error: {e}")
+        app_logger.error(f"Text translate error: {e}")
         raise HTTPException(500, f"Translation failed: {str(e)}")
 
 @app.get("/api/jobs")

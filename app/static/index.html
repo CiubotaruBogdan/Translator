@@ -281,13 +281,13 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
 
     </div>
     <div class="sidebar-nav">
-      <div class="nav-item active" data-page="textTranslate" onclick="showPage('textTranslate')">
-        <svg viewBox="0 0 24 24"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
-        Traducere text
-      </div>
-      <div class="nav-item" data-page="translate" onclick="showPage('translate')">
+      <div class="nav-item active" data-page="translate" onclick="showPage('translate')">
         <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
         Traducere documente
+      </div>
+      <div class="nav-item" data-page="textTranslate" onclick="showPage('textTranslate')">
+        <svg viewBox="0 0 24 24"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
+        Traducere text
       </div>
       <div class="nav-item" data-page="jobs" onclick="showPage('jobs')">
         <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM7 10h2v7H7zm4-3h2v10h-2zm4 6h2v4h-2z"/></svg>
@@ -322,7 +322,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
   <div class="content">
 
     <!-- ==================== PAGE: TEXT TRANSLATE ==================== -->
-    <div class="page active" id="page-textTranslate">
+    <div class="page" id="page-textTranslate">
       <h2 class="page-title">Traducere text</h2>
 
       <!-- Language bar -->
@@ -359,10 +359,6 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         <div class="translate-panel" style="border-left:1px solid var(--border)">
           <div class="translate-panel-header">
             <span style="font-size:13px;font-weight:600;color:var(--text2)">Traducere</span>
-            <button class="copy-btn" onclick="copyTTOutput()" title="Copiază">
-              <svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
-              <span>Copiază</span>
-            </button>
           </div>
           <div class="translate-panel-body">
             <div class="output-text placeholder" id="ttOutput">Traducerea va apărea aici...</div>
@@ -384,7 +380,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
     </div>
 
     <!-- ==================== PAGE: TRANSLATE (DOCUMENTS) ==================== -->
-    <div class="page" id="page-translate">
+    <div class="page active" id="page-translate">
       <h2 class="page-title">Traducere documente</h2>
 
       <!-- Language selection -->
