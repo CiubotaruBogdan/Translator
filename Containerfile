@@ -56,9 +56,9 @@ COPY app/ /app/
 # -- Create working directories --
 RUN mkdir -p /app/uploads /app/outputs
 
-# -- Copy entrypoint --
+# -- Copy entrypoint (fix Windows CRLF line endings if present) --
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # -- Environment variables --
 ENV PORT=8080

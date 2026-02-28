@@ -207,7 +207,7 @@ set "WAIT_COUNT=0"
 set /a WAIT_COUNT+=1
 if !WAIT_COUNT! GTR 30 goto START_TIMEOUT
 
-curl -s -o NUL -w "" "http://localhost:!USER_PORT!/api/status" >nul 2>&1
+curl -s -o NUL "http://localhost:!USER_PORT!/api/status" >nul 2>&1
 if not errorlevel 1 goto START_READY
 
 echo    Se asteapta... !WAIT_COUNT!/30

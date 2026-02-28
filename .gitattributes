@@ -1,2 +1,12 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts MUST keep LF line endings (Linux container)
+*.sh text eol=lf
+entrypoint.sh text eol=lf
+
+# Python files keep LF
+*.py text eol=lf
+
+# Batch files use CRLF (Windows)
+*.bat text eol=crlf
