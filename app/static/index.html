@@ -124,22 +124,22 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
 .file-item-remove svg{width:16px;height:16px;fill:currentColor}
 
 /* Job list */
-.job-item{padding:14px 18px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr auto 1fr;grid-template-rows:auto auto;align-items:center;gap:10px 14px;transition:.1s}
+.job-item{padding:14px 18px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr auto;grid-template-rows:auto auto;align-items:center;gap:10px 14px;transition:.1s}
 .job-item:last-child{border-bottom:none}
 .job-item:hover{background:var(--bg3)}
 .job-info{min-width:0;justify-self:start}
 .job-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .job-meta{font-size:12px;color:var(--text3);margin-top:2px}
-.job-stats-center{display:flex;gap:10px;justify-self:center;align-items:center;flex-wrap:wrap;justify-content:center}
+.job-stats-center{display:flex;gap:10px;justify-self:end;align-items:center;flex-wrap:wrap;justify-content:flex-end}
 .job-stat-card{min-width:100px;width:120px;text-align:center;padding:8px 12px;background:var(--bg3);border-radius:8px}
-.job-stat-card.wide{width:250px;min-width:200px}
+.job-stat-card.wide{width:175px;min-width:140px}
 .job-stat-card.error{background:var(--red-l)}
 .job-stat-card.warning{background:var(--amber-l)}
 .job-stat-label{font-size:11px;color:var(--text3);margin-bottom:2px}
 .job-stat-value{font-size:14px;font-weight:700;color:var(--text)}
 .job-stat-value.red{color:var(--red)}
 .job-stat-value.amber{color:var(--amber)}
-.job-right{display:flex;align-items:center;gap:10px;justify-self:end}
+/* .job-right merged into .job-stats-center */
 .job-progress{width:120px;flex-shrink:0}
 .job-actions{display:flex;gap:4px}
 .job-bottom{grid-column:1/-1}
@@ -1460,8 +1460,6 @@ function renderJobs(jobsList) {
         <div class="job-stat-card"><div class="job-stat-label">Segmente</div><div class="job-stat-value">${live.completed_chunks||j.completed_chunks} / ${live.total_chunks||j.total_chunks}</div></div>
         <div class="job-stat-card"><div class="job-stat-label">Timp total</div><div class="job-stat-value">${runningTime}</div></div>
         ${extraCards}
-      </div>
-      <div class="job-right">
         <div class="job-progress">
           <div class="progress"><div class="progress-fill ${j.status==='completed'?'done':j.status==='failed'?'error':''}" style="width:${(live.progress||j.progress)}%"></div></div>
           <div style="font-size:11px;color:var(--text3);margin-top:2px;text-align:center">${Math.round(live.progress||j.progress)}%</div>
