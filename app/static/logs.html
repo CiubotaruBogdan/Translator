@@ -117,6 +117,17 @@
   </div>
 </div>
 
+<!-- Network Diagnostics -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Diagnosticare retea (Container &harr; Gazda)</span>
+    <button class="btn btn-secondary btn-sm" onclick="runNetDiag()">Ruleaza diagnostic</button>
+  </div>
+  <div class="card-body" id="netDiagPanel">
+    <div style="color:var(--text3);font-size:13px">Apasa butonul pentru a rula diagnosticarea retelei.</div>
+  </div>
+</div>
+
 <!-- Useful Commands -->
 <div class="card">
   <div class="card-header"><span class="card-title">Comenzi utile (referinta)</span></div>
@@ -272,6 +283,46 @@ async function cleanupFiles() {
     loadFiles();
   } catch (e) {
     alert('Eroare: ' + e.message);
+  }
+}
+
+async function runNetDiag() {
+  const panel = $('netDiagPanel');
+  panel.innerHTML = '<div style="color:var(--text3);font-size:13px">Se ruleaza diagnosticarea... (poate dura 10-15 secunde)</div>';
+  try {
+    const resp = await fetch('/api/network-diag');
+    const data = await resp.json();
+    let html = '<div style="font-size:13px">';
+    html += '<div style="margin-bottom:12px"><strong>Container IP:</strong> ' + (data.container_ip || 'N/A') + '</div>';
+    html += '<div style="margin-bottom:12px"><strong>Gateway:</strong> ' + (data.gateway_ip || 'N/A') + '</div>';
+    html += '<div style="margin-bottom:12px"><strong>Ollama URL configurat:</strong> <code>' + escHtml(data.ollama_url) + '</code></div>';
+    if (data.routes) {
+      html += '<div style="margin-bottom:12px"><strong>Rute:</strong><br><pre style="background:var(--bg);padding:8px;border-radius:4px;font-size:11px;overflow-x:auto">' + escHtml(data.routes) + '</pre></div>';
+    }
+    html += '<table class="table-simple" style="margin-top:8px">';
+    html += '<thead><tr><th>Host</th><th>Ping</th><th>IP rezolvat</th><th>Ollama</th><th>Versiune</th></tr></thead><tbody>';
+    for (const t of (data.tests || [])) {
+      const pingOk = t.ping ? '<span style="color:var(--green)">&#10003; OK</span>' : '<span style="color:var(--red)">&#10007; FAIL</span>';
+      const ollamaOk = t.ollama ? '<span style="color:var(--green)">&#10003; Conectat</span>' : '<span style="color:var(--red)">&#10007; Nu</span>';
+      html += '<tr>';
+      html += '<td><code>' + escHtml(t.host) + '</code></td>';
+      html += '<td>' + pingOk + '</td>';
+      html += '<td>' + (t.resolved_ip || '-') + '</td>';
+      html += '<td>' + ollamaOk + '</td>';
+      html += '<td>' + (t.ollama_version || '-') + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    html += '<div style="margin-top:12px;padding:10px;background:var(--bg);border-radius:6px;font-size:12px;color:var(--text2)">';
+    html += '<strong>Sfaturi:</strong><br>';
+    html += '&bull; Ollama trebuie sa asculte pe 0.0.0.0 (setati OLLAMA_HOST=0.0.0.0:11434 pe gazda)<br>';
+    html += '&bull; Firewall-ul Windows trebuie sa permita portul 11434<br>';
+    html += '&bull; Daca niciun host nu raspunde, reporniti containerul<br>';
+    html += '&bull; Folositi adresa IP care apare cu Ollama=Conectat in setarile aplicatiei';
+    html += '</div></div>';
+    panel.innerHTML = html;
+  } catch (e) {
+    panel.innerHTML = '<div style="color:var(--red);font-size:13px">Eroare: ' + e.message + '</div>';
   }
 }
 

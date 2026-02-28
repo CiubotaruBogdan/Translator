@@ -70,7 +70,9 @@ OUTPUT_DIR = BASE_DIR / "outputs"
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-DEFAULT_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+# OLLAMA_URL can be 'auto' (set by entrypoint.sh after detection) or explicit URL
+_ollama_env = os.environ.get("OLLAMA_URL", "http://host.containers.internal:11434")
+DEFAULT_OLLAMA_URL = _ollama_env if _ollama_env != "auto" else "http://host.containers.internal:11434"
 DEFAULT_LIBRETRANSLATE_URL = os.environ.get("LIBRETRANSLATE_URL", "http://127.0.0.1:5000")
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "translategemma")
 DEFAULT_ENGINE = os.environ.get("TRANSLATE_ENGINE", "ollama")  # 'ollama' or 'libretranslate'
@@ -1239,6 +1241,74 @@ async def api_system_info():
                            JobStatus.TRANSLATING, JobStatus.ASSEMBLING)),
         "ollama_url": DEFAULT_OLLAMA_URL
     }
+
+@app.get("/api/network-diag")
+async def api_network_diagnostics():
+    """Run network diagnostics to help troubleshoot Ollama connectivity."""
+    import subprocess as sp
+    results = {"tests": [], "ollama_url": DEFAULT_OLLAMA_URL}
+
+    # Get container network info
+    try:
+        gw = sp.run(['ip', 'route'], capture_output=True, text=True, timeout=5)
+        results["routes"] = gw.stdout.strip()
+    except:
+        results["routes"] = "unavailable"
+
+    try:
+        hostname_out = sp.run(['hostname', '-I'], capture_output=True, text=True, timeout=5)
+        results["container_ip"] = hostname_out.stdout.strip()
+    except:
+        results["container_ip"] = "unavailable"
+
+    # Test various host endpoints
+    ollama_port = os.environ.get("OLLAMA_PORT", "11434")
+    test_hosts = [
+        "host.containers.internal",
+        "host.docker.internal",
+        "host.wsl.internal",
+    ]
+    # Add gateway IP
+    try:
+        gw_line = sp.run(['ip', 'route', 'show', 'default'], capture_output=True, text=True, timeout=5)
+        gw_ip = gw_line.stdout.strip().split()[2] if gw_line.stdout.strip() else None
+        if gw_ip:
+            test_hosts.append(gw_ip)
+            results["gateway_ip"] = gw_ip
+    except:
+        pass
+
+    for host in test_hosts:
+        test = {"host": host, "ping": False, "ollama": False, "resolved_ip": None}
+        # Ping test
+        try:
+            ping = sp.run(['ping', '-c', '1', '-W', '2', host],
+                          capture_output=True, text=True, timeout=5)
+            test["ping"] = (ping.returncode == 0)
+        except:
+            pass
+        # DNS resolution
+        try:
+            getent = sp.run(['getent', 'hosts', host],
+                            capture_output=True, text=True, timeout=5)
+            if getent.returncode == 0:
+                test["resolved_ip"] = getent.stdout.strip().split()[0]
+        except:
+            pass
+        # Ollama API test
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"http://{host}:{ollama_port}/api/version",
+                                       timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    if resp.status == 200:
+                        test["ollama"] = True
+                        data = await resp.json()
+                        test["ollama_version"] = data.get("version", "unknown")
+        except:
+            pass
+        results["tests"].append(test)
+
+    return results
 
 @app.get("/api/jobs/{job_id}/events")
 async def api_sse(request: Request, job_id: str):

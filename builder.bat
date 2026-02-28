@@ -111,7 +111,9 @@ if %ERRORLEVEL% NEQ 0 (
     echo.
     echo  Copiaza pe stick USB:
     echo    - %TAR_NAME%
-    echo    - traducator_manager.bat
+    echo    - traducator_manager.bat (managerul nou, interactiv)
+    echo    - TUTORIAL_DOCKER.md (acest ghid)
+    echo    (Fisierul ollama_translator_activator.bat nu mai este necesar)
 )
 
 echo.
@@ -162,7 +164,9 @@ if %ERRORLEVEL% NEQ 0 (
     echo.
     echo  Copiaza pe stick USB catre statia offline:
     echo    - %TAR_NAME%
-    echo    - traducator_manager.bat
+    echo    - traducator_manager.bat (managerul nou, interactiv)
+    echo    - TUTORIAL_DOCKER.md (acest ghid)
+    echo    (Fisierul ollama_translator_activator.bat nu mai este necesar)
 )
 
 echo.
