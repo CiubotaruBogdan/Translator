@@ -121,8 +121,19 @@ fi
 
 # -- Start LibreTranslate in background --
 echo ""
+
+# Read installed languages from build-time file or env var
+if [ -f /app/installed_languages.txt ]; then
+    INSTALLED_LANGS=$(cat /app/installed_languages.txt)
+elif [ -n "$INSTALLED_LANGUAGES" ]; then
+    INSTALLED_LANGS="$INSTALLED_LANGUAGES"
+else
+    INSTALLED_LANGS="en,ro"
+fi
+
 echo "[2/3] Starting LibreTranslate on port 5000..."
-libretranslate --host 127.0.0.1 --port 5000 --load-only en,ro,fr --threads 4 --disable-web-ui &
+echo "      Languages: ${INSTALLED_LANGS}"
+libretranslate --host 127.0.0.1 --port 5000 --load-only "${INSTALLED_LANGS}" --threads 4 --disable-web-ui &
 LIBRE_PID=$!
 
 # Wait for LibreTranslate to be ready

@@ -85,21 +85,33 @@ DEFAULT_NUM_CTX = 2048
 
 LANG_EN = {
     'ro': 'Romanian', 'en': 'English', 'fr': 'French', 'de': 'German',
-    'es': 'Spanish', 'it': 'Italian', 'pt': 'Portuguese', 'nl': 'Dutch',
-    'pl': 'Polish', 'cs': 'Czech', 'sk': 'Slovak', 'hu': 'Hungarian',
-    'bg': 'Bulgarian', 'hr': 'Croatian', 'sl': 'Slovenian', 'sr': 'Serbian',
-    'sq': 'Albanian', 'mk': 'Macedonian', 'uk': 'Ukrainian', 'ru': 'Russian',
-    'el': 'Greek', 'tr': 'Turkish', 'ar': 'Arabic', 'he': 'Hebrew',
-    'fa': 'Persian', 'hi': 'Hindi', 'bn': 'Bengali', 'ta': 'Tamil',
-    'te': 'Telugu', 'kn': 'Kannada', 'ml': 'Malayalam', 'mr': 'Marathi',
-    'gu': 'Gujarati', 'ur': 'Urdu', 'ja': 'Japanese', 'ko': 'Korean',
-    'zh-Hans': 'Chinese Simplified', 'zh-Hant': 'Chinese Traditional',
+    'es': 'Spanish', 'it': 'Italian', 'pt': 'Portuguese', 'pb': 'Portuguese (Brazil)',
+    'nl': 'Dutch', 'pl': 'Polish', 'cs': 'Czech', 'sk': 'Slovak', 'hu': 'Hungarian',
+    'bg': 'Bulgarian', 'sl': 'Slovenian', 'sq': 'Albanian',
+    'uk': 'Ukrainian', 'ru': 'Russian', 'el': 'Greek', 'tr': 'Turkish',
+    'ar': 'Arabic', 'he': 'Hebrew', 'fa': 'Persian', 'hi': 'Hindi',
+    'bn': 'Bengali', 'ur': 'Urdu', 'ja': 'Japanese', 'ko': 'Korean',
+    'zh': 'Chinese', 'zt': 'Chinese Traditional',
     'th': 'Thai', 'vi': 'Vietnamese', 'id': 'Indonesian', 'ms': 'Malay',
-    'sv': 'Swedish', 'da': 'Danish', 'no': 'Norwegian', 'fi': 'Finnish',
-    'et': 'Estonian', 'lt': 'Lithuanian', 'lv': 'Latvian', 'af': 'Afrikaans',
-    'sw': 'Swahili', 'ca': 'Catalan', 'gl': 'Galician', 'cy': 'Welsh',
-    'ga': 'Irish', 'mt': 'Maltese'
+    'sv': 'Swedish', 'da': 'Danish', 'nb': 'Norwegian', 'fi': 'Finnish',
+    'et': 'Estonian', 'lt': 'Lithuanian', 'lv': 'Latvian',
+    'ca': 'Catalan', 'gl': 'Galician', 'eu': 'Basque',
+    'ga': 'Irish', 'tl': 'Tagalog', 'az': 'Azerbaijani', 'ky': 'Kyrgyz',
+    'eo': 'Esperanto'
 }
+
+def _get_installed_languages():
+    """Read installed language codes from build-time file or env var."""
+    try:
+        lang_file = Path("/app/installed_languages.txt")
+        if lang_file.exists():
+            return lang_file.read_text().strip().split(",")
+    except:
+        pass
+    env_langs = os.environ.get("INSTALLED_LANGUAGES", "")
+    if env_langs:
+        return [l.strip() for l in env_langs.split(",") if l.strip()]
+    return ["en", "ro"]
 
 # ============================================================
 # In-Memory Log Handler
@@ -1242,7 +1254,8 @@ async def api_system_info():
         "active_jobs": sum(1 for j in jobs.values() if j.status in
                           (JobStatus.QUEUED, JobStatus.EXTRACTING, JobStatus.CHUNKING,
                            JobStatus.TRANSLATING, JobStatus.ASSEMBLING)),
-        "ollama_url": DEFAULT_OLLAMA_URL
+        "ollama_url": DEFAULT_OLLAMA_URL,
+        "installed_languages": _get_installed_languages()
     }
 
 @app.get("/api/network-diag")

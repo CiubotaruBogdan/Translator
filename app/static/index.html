@@ -553,6 +553,8 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
               Reîncarcă limbi
             </button>
           </div>
+          <!-- Installed languages info -->
+          <div id="installedLangsInfo" style="font-size:12px;color:var(--text3);margin-bottom:8px">Limbi instalate: se încarcă...</div>
           <!-- LibreTranslate languages table -->
           <div id="libreLanguagesList" style="margin-top:12px"></div>
         </div>
@@ -646,25 +648,29 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
 
 <script>
 // ============================================================
-// LANGUAGES
+// LANGUAGES - All Argos Translate supported languages
+// Frontend shows all; LibreTranslate engine uses only installed ones
+// Ollama engine can translate any language regardless of this list
 // ============================================================
-const LANGS = [
+const ALL_LANGS = [
   {c:'ro',n:'Română'},{c:'en',n:'Engleză'},{c:'fr',n:'Franceză'},{c:'de',n:'Germană'},
-  {c:'es',n:'Spaniolă'},{c:'it',n:'Italiană'},{c:'pt',n:'Portugheză'},{c:'nl',n:'Olandeză'},
-  {c:'pl',n:'Poloneză'},{c:'cs',n:'Cehă'},{c:'sk',n:'Slovacă'},{c:'hu',n:'Maghiară'},
-  {c:'bg',n:'Bulgară'},{c:'hr',n:'Croată'},{c:'sl',n:'Slovenă'},{c:'sr',n:'Sârbă'},
-  {c:'sq',n:'Albaneză'},{c:'mk',n:'Macedoneană'},{c:'uk',n:'Ucraineană'},{c:'ru',n:'Rusă'},
-  {c:'el',n:'Greacă'},{c:'tr',n:'Turcă'},{c:'ar',n:'Arabă'},{c:'he',n:'Ebraică'},
-  {c:'fa',n:'Persană'},{c:'hi',n:'Hindi'},{c:'bn',n:'Bengali'},{c:'ja',n:'Japoneză'},
-  {c:'ko',n:'Coreeană'},{c:'zh-Hans',n:'Chineză (simplificată)'},{c:'zh-Hant',n:'Chineză (tradițională)'},
+  {c:'es',n:'Spaniolă'},{c:'it',n:'Italiană'},{c:'pt',n:'Portugheză'},{c:'pb',n:'Portugheză (Brazilia)'},
+  {c:'nl',n:'Olandeză'},{c:'pl',n:'Poloneză'},{c:'cs',n:'Cehă'},{c:'sk',n:'Slovacă'},
+  {c:'hu',n:'Maghiară'},{c:'bg',n:'Bulgară'},{c:'sl',n:'Slovenă'},{c:'sq',n:'Albaneză'},
+  {c:'uk',n:'Ucraineană'},{c:'ru',n:'Rusă'},{c:'el',n:'Greacă'},{c:'tr',n:'Turcă'},
+  {c:'ar',n:'Arabă'},{c:'he',n:'Ebraică'},{c:'fa',n:'Persană'},{c:'hi',n:'Hindi'},
+  {c:'bn',n:'Bengali'},{c:'ja',n:'Japoneză'},{c:'ko',n:'Coreeană'},
+  {c:'zh',n:'Chineză'},{c:'zt',n:'Chineză (tradițională)'},
   {c:'th',n:'Thailandeză'},{c:'vi',n:'Vietnameză'},{c:'sv',n:'Suedeză'},{c:'da',n:'Daneză'},
-  {c:'no',n:'Norvegiană'},{c:'fi',n:'Finlandeză'},{c:'et',n:'Estonă'},{c:'lt',n:'Lituaniană'},
+  {c:'nb',n:'Norvegiană'},{c:'fi',n:'Finlandeză'},{c:'et',n:'Estonă'},{c:'lt',n:'Lituaniană'},
   {c:'lv',n:'Letonă'},{c:'id',n:'Indoneziană'},{c:'ms',n:'Malaeziană'},
-  {c:'af',n:'Afrikaans'},{c:'sw',n:'Swahili'},{c:'ca',n:'Catalană'},{c:'gl',n:'Galiciană'},
-  {c:'cy',n:'Galeză'},{c:'ga',n:'Irlandeză'},{c:'mt',n:'Malteză'},
-  {c:'ta',n:'Tamil'},{c:'te',n:'Telugu'},{c:'kn',n:'Kannada'},{c:'ml',n:'Malayalam'},
-  {c:'mr',n:'Marathi'},{c:'gu',n:'Gujarati'},{c:'ur',n:'Urdu'}
+  {c:'ca',n:'Catalană'},{c:'gl',n:'Galiciană'},{c:'eu',n:'Bască'},
+  {c:'ga',n:'Irlandeză'},{c:'ur',n:'Urdu'},{c:'tl',n:'Tagalog'},
+  {c:'az',n:'Azeră'},{c:'ky',n:'Kirgiză'},{c:'eo',n:'Esperanto'}
 ];
+
+// Will be populated at init: either from server (installed languages) or full list
+let LANGS = ALL_LANGS;
 
 // ============================================================
 // STATE
@@ -678,27 +684,52 @@ const $ = id => document.getElementById(id);
 // ============================================================
 // INIT
 // ============================================================
-function init() {
+function populateLanguages(langs) {
   const src = $('sourceLang'), tgt = $('targetLang');
-  LANGS.forEach(l => {
+  const savedSrc = src.value || localStorage.getItem('sourceLang') || 'ro';
+  const savedTgt = tgt.value || localStorage.getItem('targetLang') || 'en';
+  src.innerHTML = '';
+  tgt.innerHTML = '';
+  langs.forEach(l => {
     src.add(new Option(l.n, l.c));
     tgt.add(new Option(l.n, l.c));
   });
-  src.value = 'ro';
-  tgt.value = 'en';
+  src.value = savedSrc;
+  tgt.value = savedTgt;
+}
+
+function init() {
+  // Initially populate with all languages
+  populateLanguages(ALL_LANGS);
 
   if (localStorage.getItem('theme') === 'dark') document.body.setAttribute('data-theme', 'dark');
-  // Fetch server-detected Ollama URL if user hasn't saved a custom one
-  if (localStorage.getItem('ollamaUrl')) {
-    $('ollamaUrl').value = localStorage.getItem('ollamaUrl');
-  } else {
-    fetch('/api/system-info').then(r => r.json()).then(info => {
-      if (info.ollama_url && !localStorage.getItem('ollamaUrl')) {
-        $('ollamaUrl').value = info.ollama_url;
-        refreshModels(); // Re-fetch models with correct URL
+
+  // Fetch server info: Ollama URL + installed languages
+  fetch('/api/system-info').then(r => r.json()).then(info => {
+    // Set Ollama URL if not saved by user
+    if (info.ollama_url && !localStorage.getItem('ollamaUrl')) {
+      $('ollamaUrl').value = info.ollama_url;
+      refreshModels();
+    }
+    // Update language list based on engine
+    if (info.installed_languages && info.installed_languages.length) {
+      const installed = info.installed_languages;
+      // For LibreTranslate engine, show only installed languages
+      // For Ollama engine, show all languages (Ollama can translate any)
+      const engine = $('engineSelect').value || 'ollama';
+      if (engine === 'libretranslate') {
+        LANGS = ALL_LANGS.filter(l => installed.includes(l.c));
+        populateLanguages(LANGS);
       }
-    }).catch(() => {});
-  }
+      // Show installed languages info
+      const infoEl = document.getElementById('installedLangsInfo');
+      if (infoEl) {
+        infoEl.textContent = `Limbi LibreTranslate: ${installed.join(', ')}`;
+      }
+    }
+  }).catch(() => {});
+
+  if (localStorage.getItem('ollamaUrl')) $('ollamaUrl').value = localStorage.getItem('ollamaUrl');
   if (localStorage.getItem('libreUrl')) $('libreUrl').value = localStorage.getItem('libreUrl');
   if (localStorage.getItem('customModel')) $('customModel').value = localStorage.getItem('customModel');
   if (localStorage.getItem('concurrency')) $('concurrency').value = localStorage.getItem('concurrency');
@@ -737,6 +768,20 @@ function onEngineChange() {
   } else {
     $('ollamaStatusText').textContent = 'Motor: LibreTranslate';
     $('ollamaStatusDot').style.background = 'var(--primary)';
+  }
+  // Update language dropdowns based on engine
+  if (isOllama) {
+    // Ollama can translate any language
+    LANGS = ALL_LANGS;
+    populateLanguages(LANGS);
+  } else {
+    // LibreTranslate: only show installed languages
+    fetch('/api/system-info').then(r => r.json()).then(info => {
+      if (info.installed_languages && info.installed_languages.length) {
+        LANGS = ALL_LANGS.filter(l => info.installed_languages.includes(l.c));
+        populateLanguages(LANGS);
+      }
+    }).catch(() => {});
   }
 }
 
