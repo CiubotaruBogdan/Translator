@@ -439,7 +439,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
           <span class="card-title">Istoric traduceri</span>
           <span id="jobsCount" style="font-size:12px;color:var(--text3)">0 job-uri</span>
         </div>
-        <div id="jobsList" style="max-height:600px;overflow-y:auto">
+        <div id="jobsList" style="max-height:calc(100vh - 200px);overflow-y:auto">
           <div style="padding:40px;text-align:center;color:var(--text3)">Niciun job încă</div>
         </div>
       </div>
@@ -753,6 +753,8 @@ let LANGS = ALL_LANGS;
 let activeJobs = {};  // jobId -> {sse, data}
 let ws = null;
 let selectedFiles = [];  // Array of File objects
+let jobsPageSSE = {};   // jobId -> {sse, data} for jobs page live tracking
+const openJobPanels = new Set();  // track expanded job panels on jobs page
 
 const $ = id => document.getElementById(id);
 
@@ -1300,6 +1302,7 @@ async function loadJobs() {
   try {
     const resp = await fetch('/api/jobs');
     const data = await resp.json();
+    lastJobsList = data.jobs;
     renderJobs(data.jobs);
   } catch {}
 }
@@ -1312,9 +1315,26 @@ function renderJobs(jobsList) {
   $('jobsCount').textContent = jobsList.length + ' job-uri';
 
   if (!jobsList.length) {
-    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3)">Niciun job încă</div>';
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3)">Niciun job \u00eenc\u0103</div>';
     return;
   }
+
+  // Start SSE for active jobs, close for finished ones
+  active.forEach(j => {
+    if (!jobsPageSSE[j.job_id]) startJobPageSSE(j.job_id);
+  });
+  Object.keys(jobsPageSSE).forEach(jid => {
+    const found = jobsList.find(j => j.job_id === jid);
+    if (!found || ['completed','failed','cancelled'].includes(found.status)) {
+      stopJobPageSSE(jid);
+    }
+  });
+
+  // Save open panels state
+  el.querySelectorAll('details[data-jobs-id]').forEach(det => {
+    if (det.open) openJobPanels.add(det.getAttribute('data-jobs-id'));
+    else openJobPanels.delete(det.getAttribute('data-jobs-id'));
+  });
 
   el.innerHTML = jobsList.map(j => {
     const statusColors = {completed:'green',failed:'red',cancelled:'amber',translating:'blue',extracting:'blue',chunking:'blue',assembling:'blue',queued:'purple'};
@@ -1322,23 +1342,85 @@ function renderJobs(jobsList) {
     const engineLabel = j.engine === 'libretranslate' ? 'LibreTranslate' : (j.model || 'Ollama');
     const isActive = ['translating','extracting','chunking','assembling','queued'].includes(j.status);
     const isFinished = ['completed','failed','cancelled'].includes(j.status);
-    return `<div class="job-item">
+
+    // Use SSE data if available for live stats
+    const live = jobsPageSSE[j.job_id]?.data || j;
+    const chars = live.translated_chars ? live.translated_chars.toLocaleString() : '0';
+    const totalChars = live.total_chars ? live.total_chars.toLocaleString() : '0';
+    const elapsed = live.elapsed_seconds ? fmtDuration(live.elapsed_seconds) : '--';
+
+    // Events from SSE data
+    const events = live.events || j.events || [];
+    const icons = {success:'\u2713', error:'\u2717', warning:'\u26a0', info:'\u2139'};
+    const eventsHtml = events.map(ev =>
+      `<div class="event-line"><span class="event-time">${ev.time}</span><span class="event-type ${ev.type}">${icons[ev.type]||'\u00b7'}</span><span class="event-msg"><strong>${ev.message}</strong> ${ev.detail ? '\u2014 '+ev.detail : ''}</span></div>`
+    ).join('');
+
+    const statsRow = `<div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;padding:0 18px 8px">
+      <span style="font-size:12px;color:var(--text3)">Caractere: <strong style="color:var(--text2)">${chars}/${totalChars}</strong></span>
+      <span style="font-size:12px;color:var(--text3)">Timp: <strong style="color:var(--text2)">${elapsed}</strong></span>
+      <span style="font-size:12px;color:var(--text3)">Segmente: <strong style="color:var(--text2)">${live.completed_chunks||j.completed_chunks}/${live.total_chunks||j.total_chunks}</strong></span>
+      ${live.failed_chunks ? `<span style="font-size:12px;color:var(--text3)">E\u0219uate: <strong style="color:var(--red)">${live.failed_chunks}</strong></span>` : ''}
+      ${live.retried_chunks ? `<span style="font-size:12px;color:var(--text3)">Re\u00eencerc\u0103ri: <strong style="color:var(--amber)">${live.retried_chunks}</strong></span>` : ''}
+    </div>`;
+
+    const logPanel = (isActive || events.length) ? `<div style="padding:0 18px 12px">
+      <details data-jobs-id="${j.job_id}" ${openJobPanels.has(j.job_id) ? 'open' : ''}>
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">Jurnal de evenimente (${events.length})</summary>
+        <div class="event-log" style="max-height:200px">${eventsHtml}</div>
+      </details>
+    </div>` : '';
+
+    return `<div class="job-item" style="flex-wrap:wrap">
       <div class="job-info">
         <div class="job-name">${j.filename}</div>
         <div class="job-meta">${j.source_lang}\u2192${j.target_lang} \u00b7 ${engineLabel} \u00b7 ${j.client_ip} \u00b7 ${j.created_at.substring(11,19)}</div>
       </div>
       <div class="job-progress">
-        <div class="progress"><div class="progress-fill ${j.status==='completed'?'done':j.status==='failed'?'error':''}" style="width:${j.progress}%"></div></div>
-        <div style="font-size:11px;color:var(--text3);margin-top:2px">${j.completed_chunks}/${j.total_chunks} seg.</div>
+        <div class="progress"><div class="progress-fill ${j.status==='completed'?'done':j.status==='failed'?'error':''}" style="width:${(live.progress||j.progress)}%"></div></div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">${live.completed_chunks||j.completed_chunks}/${live.total_chunks||j.total_chunks} seg. \u00b7 ${Math.round(live.progress||j.progress)}%</div>
       </div>
-      <span class="badge ${color}"><span class="badge-dot ${isActive?'pulse':''}"></span> ${j.status}</span>
+      <span class="badge ${color}"><span class="badge-dot ${isActive?'pulse':''}"></span> ${isActive ? (live.current_step || j.status) : j.status}</span>
       <div class="job-actions">
         ${isActive?`<button class="btn btn-sm btn-danger" onclick="cancelJob('${j.job_id}')" title="Anuleaz\u0103">\u25a0</button>`:''}
         ${j.status==='completed'?`<button class="btn btn-sm btn-secondary" onclick="window.open('/api/jobs/${j.job_id}/download')" title="Descarc\u0103">\u2b07</button>`:''}
         ${isFinished?`<button class="btn btn-sm btn-danger" onclick="deleteJob('${j.job_id}')" title="\u0218terge">\u2715</button>`:''}
       </div>
+      ${statsRow}
+      ${logPanel}
     </div>`;
   }).join('');
+
+  // Auto-scroll event logs in jobs page
+  el.querySelectorAll('.event-log').forEach(log => log.scrollTop = log.scrollHeight);
+}
+
+function startJobPageSSE(jobId) {
+  if (jobsPageSSE[jobId]) return;
+  const sse = new EventSource(`/api/jobs/${jobId}/events`);
+  jobsPageSSE[jobId] = { sse, data: null };
+  sse.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    jobsPageSSE[jobId].data = d;
+    // Re-render only if jobs page is visible
+    if ($('page-jobs').classList.contains('active')) renderJobsFromCache();
+    if (['completed','failed','cancelled'].includes(d.status)) {
+      sse.close();
+    }
+  };
+  sse.onerror = () => {};
+}
+
+function stopJobPageSSE(jobId) {
+  if (jobsPageSSE[jobId]) {
+    if (jobsPageSSE[jobId].sse) jobsPageSSE[jobId].sse.close();
+    delete jobsPageSSE[jobId];
+  }
+}
+
+let lastJobsList = [];
+function renderJobsFromCache() {
+  if (lastJobsList.length) renderJobs(lastJobsList);
 }
 
 async function deleteJob(id) {
