@@ -124,14 +124,24 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
 .file-item-remove svg{width:16px;height:16px;fill:currentColor}
 
 /* Job list */
-.job-item{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px;transition:.1s}
+.job-item{padding:14px 18px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr auto 1fr;grid-template-rows:auto auto;align-items:center;gap:10px 14px;transition:.1s}
 .job-item:last-child{border-bottom:none}
 .job-item:hover{background:var(--bg3)}
-.job-info{flex:1;min-width:0}
+.job-info{min-width:0;justify-self:start}
 .job-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .job-meta{font-size:12px;color:var(--text3);margin-top:2px}
+.job-stats-center{display:flex;gap:10px;justify-self:center;align-items:center;flex-wrap:wrap;justify-content:center}
+.job-stat-card{min-width:100px;width:120px;text-align:center;padding:8px 12px;background:var(--bg3);border-radius:8px}
+.job-stat-card.error{background:var(--red-l)}
+.job-stat-card.warning{background:var(--amber-l)}
+.job-stat-label{font-size:11px;color:var(--text3);margin-bottom:2px}
+.job-stat-value{font-size:14px;font-weight:700;color:var(--text)}
+.job-stat-value.red{color:var(--red)}
+.job-stat-value.amber{color:var(--amber)}
+.job-right{display:flex;align-items:center;gap:10px;justify-self:end}
 .job-progress{width:120px;flex-shrink:0}
 .job-actions{display:flex;gap:4px}
+.job-bottom{grid-column:1/-1}
 
 /* Progress bar */
 .progress{height:8px;background:var(--bg3);border-radius:4px;overflow:hidden}
@@ -566,7 +576,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         <div class="card-body">
           <div class="form-group">
             <label class="form-label">URL Ollama</label>
-            <input class="form-control" id="ollamaUrl" value="" placeholder="Se detecteaza automat...">
+            <input class="form-control" id="ollamaUrl" value="" placeholder="Se detectează automat...">
             <div class="form-hint">Adresa serverului Ollama. Modificați dacă rulează pe alt port sau altă mașină.</div>
           </div>
           <div style="display:flex;gap:8px">
@@ -635,40 +645,62 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         </div>
       </div>
 
-      <!-- Performance -->
+      <!-- Performance: General -->
       <div class="card">
-        <div class="card-header"><span class="card-title">Performan\u021b\u0103 \u0219i optimiz\u0103ri</span></div>
+        <div class="card-header"><span class="card-title">Performanță generală</span></div>
         <div class="card-body">
           <div class="form-group">
-            <label class="form-label">Concurrency (chunks \u00een paralel)</label>
+            <label class="form-label">Concurrency (chunks în paralel)</label>
             <input class="form-control" type="number" id="concurrency" value="3" min="1" max="10">
-            <div class="form-hint">C\u00e2te segmente se traduc simultan. Recomandat: 1-2 pentru Ollama (GPU), 5-10 pentru LibreTranslate.</div>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Context window (num_ctx)</label>
-            <input class="form-control" type="number" id="numCtx" value="4096" min="512" max="32768" step="256">
-            <div class="form-hint">Dimensiunea ferestrei de context Ollama. 4096 e optim. Cre\u0219te\u021bi pentru documente cu paragrafe foarte lungi.</div>
+            <div class="form-hint">Câte segmente se traduc simultan. Recomandat: 1–2 pentru Ollama (GPU), 5–10 pentru LibreTranslate.</div>
           </div>
           <div class="form-group">
             <label class="form-label">Dimensiune chunk (caractere per segment)</label>
             <input class="form-control" type="number" id="chunkSize" value="3000" min="500" max="10000" step="500">
-            <div class="form-hint">C\u00e2te caractere per segment de tradus. Mai mare = mai pu\u021bine request-uri = mai rapid. Recomandat: 2000-5000.</div>
+            <div class="form-hint">Câte caractere per segment de tradus. Mai mare = mai puține request-uri = mai rapid. Recomandat: 2000–5000.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Performance: Ollama -->
+      <div class="card" id="ollamaPerfCard">
+        <div class="card-header"><span class="card-title">Optimizări Ollama</span></div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">Context window (num_ctx)</label>
+            <input class="form-control" type="number" id="numCtx" value="4096" min="512" max="32768" step="256">
+            <div class="form-hint">Dimensiunea ferestrei de context Ollama. 4096 e optim. Creșteți pentru documente cu paragrafe foarte lungi.</div>
           </div>
           <div class="form-group">
-            <label class="form-label">Batch size (segmente per request Ollama)</label>
+            <label class="form-label">Batch size (segmente per request)</label>
             <input class="form-control" type="number" id="batchSize" value="3" min="1" max="10">
-            <div class="form-hint">C\u00e2te segmente se trimit \u00eentr-un singur request la Ollama. 1 = f\u0103r\u0103 batching. 3-5 = optim. Reduce overhead-ul de prompt. Nu se aplic\u0103 la LibreTranslate.</div>
+            <div class="form-hint">Câte segmente se trimit într-un singur request la Ollama. 1 = fără batching. 3–5 = optim. Reduce overhead-ul de prompt.</div>
           </div>
           <div class="form-group">
-            <label class="form-label">Keep alive (model \u00een memorie)</label>
+            <label class="form-label">Keep alive (model în memorie)</label>
             <select class="form-control" id="keepAlive">
               <option value="5m">5 minute</option>
               <option value="15m">15 minute</option>
               <option value="30m" selected>30 minute (recomandat)</option>
-              <option value="1h">1 or\u0103</option>
-              <option value="0">Dezactivat (desc\u0103rcare imediat\u0103)</option>
+              <option value="1h">1 oră</option>
+              <option value="0">Dezactivat (descărcare imediată)</option>
             </select>
-            <div class="form-hint">C\u00e2t timp Ollama p\u0103streaz\u0103 modelul \u00een VRAM dup\u0103 ultimul request. Mai mult = pornire mai rapid\u0103 la urm\u0103torul job.</div>
+            <div class="form-hint">Cât timp Ollama păstrează modelul în VRAM după ultimul request. Mai mult = pornire mai rapidă la următorul job.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Performance: LibreTranslate -->
+      <div class="card" id="librePerfCard" style="display:none">
+        <div class="card-header"><span class="card-title">Optimizări LibreTranslate</span></div>
+        <div class="card-body">
+          <div style="color:var(--text2);font-size:13px">
+            <p style="margin-bottom:8px">LibreTranslate folosește modele Argos Translate mici, optimizate pentru CPU/RAM. Nu necesită configurări suplimentare de performanță.</p>
+            <p><strong>Recomandări:</strong></p>
+            <ul style="margin-top:4px;padding-left:20px;line-height:1.8">
+              <li><strong>Concurrency:</strong> 5–10 (LibreTranslate gestionează bine cererile paralele pe CPU)</li>
+              <li><strong>Dimensiune chunk:</strong> 2000–3000 caractere (segmente mai mici = răspunsuri mai rapide)</li>
+            </ul>
           </div>
         </div>
       </div>
@@ -680,15 +712,15 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
           <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
             <label style="font-size:13px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:8px">
               <input type="checkbox" id="convertToPdf">
-              Converteste documentele traduse in PDF (necesita LibreOffice headless)
+              Convertește documentele traduse în PDF (necesită LibreOffice headless)
             </label>
           </div>
           <button class="btn btn-secondary btn-sm" onclick="checkLibreOffice()">
             <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-            Verifica LibreOffice
+            Verifică LibreOffice
           </button>
           <div id="libreOfficeStatus" style="font-size:12px;color:var(--text3);margin-top:8px"></div>
-          <div class="form-hint" style="margin-top:8px">Daca este activat, documentele DOCX traduse vor fi convertite automat in PDF. LibreOffice headless trebuie sa fie instalat pe server/container.</div>
+          <div class="form-hint" style="margin-top:8px">Dacă este activat, documentele DOCX traduse vor fi convertite automat în PDF. LibreOffice headless trebuie să fie instalat pe server/container.</div>
         </div>
       </div>
 
@@ -879,6 +911,8 @@ function onEngineChange() {
   $('ollamaSettingsCard').style.display = isOllama ? '' : 'none';
   $('modelSettingsCard').style.display = isOllama ? '' : 'none';
   $('libreSettingsCard').style.display = isOllama ? 'none' : '';
+  $('ollamaPerfCard').style.display = isOllama ? '' : 'none';
+  $('librePerfCard').style.display = isOllama ? 'none' : '';
   // Update sidebar status text
   if (isOllama) {
     // Will be updated by WS
@@ -930,11 +964,11 @@ async function refreshLibreLanguages() {
 
 function renderLibreLanguages(languages) {
   if (!languages || !languages.length) {
-    $('libreLanguagesList').innerHTML = '<div style="color:var(--text3);font-size:13px">Nicio limb\u0103 disponibil\u0103</div>';
+    $('libreLanguagesList').innerHTML = '<div style="color:var(--text3);font-size:13px">Nicio limbă disponibilă</div>';
     return;
   }
   $('libreLanguagesList').innerHTML = `<table class="table-simple">
-    <thead><tr><th>Cod</th><th>Limb\u0103</th></tr></thead>
+    <thead><tr><th>Cod</th><th>Limbă</th></tr></thead>
     <tbody>${languages.map(l => `<tr><td><code>${l.code}</code></td><td>${l.name}</td></tr>`).join('')}</tbody>
   </table>`;
 }
@@ -1232,7 +1266,7 @@ async function checkLibreOffice() {
     if (data.available) {
       el.innerHTML = '<span style="color:var(--green)">&#10003; LibreOffice disponibil: ' + data.version + '</span>';
     } else {
-      el.innerHTML = '<span style="color:var(--amber)">&#10007; LibreOffice nu este instalat. Conversia PDF nu va fi disponibila.</span>';
+      el.innerHTML = '<span style="color:var(--amber)">&#10007; LibreOffice nu este instalat. Conversia PDF nu va fi disponibilă.</span>';
     }
   } catch (e) {
     $('libreOfficeStatus').innerHTML = '<span style="color:var(--red)">Eroare la verificare: ' + e.message + '</span>';
@@ -1342,7 +1376,7 @@ function renderJobs(jobsList) {
   $('jobsCount').textContent = jobsList.length + ' job-uri';
 
   if (!jobsList.length) {
-    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3)">Niciun job \u00eenc\u0103</div>';
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3)">Niciun job încă</div>';
     return;
   }
 
@@ -1376,64 +1410,69 @@ function renderJobs(jobsList) {
     const totalChars = live.total_chars ? live.total_chars.toLocaleString() : '0';
     const elapsed = live.elapsed_seconds ? fmtDuration(live.elapsed_seconds) : '--';
 
+    // Calculate running time from created_at
+    let runningTime = '--';
+    try {
+      const created = new Date(j.created_at);
+      const now = new Date();
+      const runningSec = Math.round((now - created) / 1000);
+      if (isFinished && j.completed_at) {
+        const completed = new Date(j.completed_at);
+        runningTime = fmtDuration(Math.round((completed - created) / 1000));
+      } else if (!isNaN(runningSec)) {
+        runningTime = fmtDuration(runningSec);
+      }
+    } catch(e) {}
+
     // Events from SSE data
     const events = live.events || j.events || [];
-    const icons = {success:'\u2713', error:'\u2717', warning:'\u26a0', info:'\u2139'};
+    const icons = {success:'✓', error:'✗', warning:'⚠', info:'ℹ'};
     const eventsHtml = events.map(ev =>
-      `<div class="event-line"><span class="event-time">${ev.time}</span><span class="event-type ${ev.type}">${icons[ev.type]||'\u00b7'}</span><span class="event-msg"><strong>${ev.message}</strong> ${ev.detail ? '\u2014 '+ev.detail : ''}</span></div>`
+      `<div class="event-line"><span class="event-time">${ev.time}</span><span class="event-type ${ev.type}">${icons[ev.type]||'·'}</span><span class="event-msg"><strong>${ev.message}</strong> ${ev.detail ? '— '+ev.detail : ''}</span></div>`
     ).join('');
 
     const currentStepLine = isActive && (live.current_step || j.current_step)
       ? `<div style="font-size:11px;color:var(--primary);margin-top:4px;font-style:italic">${live.current_step || j.current_step}</div>`
       : '';
 
-    const statsRow = `<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;padding:0 18px 8px;width:100%">
-      <div style="min-width:110px;text-align:center;padding:8px 12px;background:var(--bg3);border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Caractere</div>
-        <div style="font-size:14px;font-weight:700;color:var(--text)">${chars} / ${totalChars}</div>
-      </div>
-      <div style="min-width:110px;text-align:center;padding:8px 12px;background:var(--bg3);border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Timp</div>
-        <div style="font-size:14px;font-weight:700;color:var(--text)">${elapsed}</div>
-      </div>
-      <div style="min-width:110px;text-align:center;padding:8px 12px;background:var(--bg3);border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Segmente</div>
-        <div style="font-size:14px;font-weight:700;color:var(--text)">${live.completed_chunks||j.completed_chunks} / ${live.total_chunks||j.total_chunks}</div>
-      </div>
-      ${live.failed_chunks ? `<div style="min-width:90px;text-align:center;padding:8px 12px;background:var(--red-l);border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:2px">E\u0219uate</div>
-        <div style="font-size:14px;font-weight:700;color:var(--red)">${live.failed_chunks}</div>
-      </div>` : ''}
-      ${live.retried_chunks ? `<div style="min-width:90px;text-align:center;padding:8px 12px;background:var(--amber-l);border-radius:8px">
-        <div style="font-size:11px;color:var(--text3);margin-bottom:2px">Re\u00eencerc\u0103ri</div>
-        <div style="font-size:14px;font-weight:700;color:var(--amber)">${live.retried_chunks}</div>
-      </div>` : ''}
-    </div>`;
+    // Extra stat cards (failed, retried) - shown conditionally
+    const extraCards = [
+      live.failed_chunks ? `<div class="job-stat-card error"><div class="job-stat-label">Eșuate</div><div class="job-stat-value red">${live.failed_chunks}</div></div>` : '',
+      live.retried_chunks ? `<div class="job-stat-card warning"><div class="job-stat-label">Reîncercări</div><div class="job-stat-value amber">${live.retried_chunks}</div></div>` : ''
+    ].filter(Boolean).join('');
 
-    const logPanel = (isActive || events.length) ? `<div style="padding:0 18px 12px;width:100%">
+    const logPanel = (isActive || events.length) ? `<div class="job-bottom" style="padding-top:4px">
       <details data-jobs-id="${j.job_id}" ${openJobPanels.has(j.job_id) ? 'open' : ''}>
         <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">Jurnal de evenimente (${events.length})</summary>
         <div class="event-log" style="max-height:200px">${eventsHtml}</div>
       </details>
     </div>` : '';
 
-    return `<div class="job-item" style="flex-wrap:wrap">
-      <div class="job-info" style="min-width:200px">
+    return `<div class="job-item">
+      <div class="job-info">
         <div class="job-name">${j.filename}</div>
-        <div class="job-meta">${j.source_lang}\u2192${j.target_lang} \u00b7 ${engineLabel} \u00b7 ${j.client_ip} \u00b7 ${j.created_at.substring(11,19)}</div>
+        <div class="job-meta">${j.source_lang} → ${j.target_lang} · ${engineLabel} · ${j.client_ip} · ${j.created_at.substring(11,19)}</div>
         ${currentStepLine}
       </div>
-      <div class="job-progress" style="width:140px;flex-shrink:0">
-        <div class="progress"><div class="progress-fill ${j.status==='completed'?'done':j.status==='failed'?'error':''}" style="width:${(live.progress||j.progress)}%"></div></div>
-        <div style="font-size:11px;color:var(--text3);margin-top:2px">${Math.round(live.progress||j.progress)}%</div>
+      <div class="job-stats-center">
+        <div class="job-stat-card"><div class="job-stat-label">Caractere</div><div class="job-stat-value">${chars} / ${totalChars}</div></div>
+        <div class="job-stat-card"><div class="job-stat-label">Traducere</div><div class="job-stat-value">${elapsed}</div></div>
+        <div class="job-stat-card"><div class="job-stat-label">Segmente</div><div class="job-stat-value">${live.completed_chunks||j.completed_chunks} / ${live.total_chunks||j.total_chunks}</div></div>
+        <div class="job-stat-card"><div class="job-stat-label">Timp total</div><div class="job-stat-value">${runningTime}</div></div>
+        ${extraCards}
       </div>
-      <span class="badge ${color}"><span class="badge-dot ${isActive?'pulse':''}"></span> ${j.status}</span>
-      <div class="job-actions">
-        ${isActive?`<button class="btn btn-sm btn-danger" onclick="cancelJob('${j.job_id}')" title="Anuleaz\u0103">\u25a0</button>`:''}
-        ${j.status==='completed'?`<button class="btn btn-sm btn-secondary" onclick="window.open('/api/jobs/${j.job_id}/download')" title="Descarc\u0103">\u2b07</button>`:''}
-        ${isFinished?`<button class="btn btn-sm btn-danger" onclick="deleteJob('${j.job_id}')" title="\u0218terge">\u2715</button>`:''}
+      <div class="job-right">
+        <div class="job-progress">
+          <div class="progress"><div class="progress-fill ${j.status==='completed'?'done':j.status==='failed'?'error':''}" style="width:${(live.progress||j.progress)}%"></div></div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px;text-align:center">${Math.round(live.progress||j.progress)}%</div>
+        </div>
+        <span class="badge ${color}"><span class="badge-dot ${isActive?'pulse':''}"></span> ${j.status}</span>
+        <div class="job-actions">
+          ${isActive?`<button class="btn btn-sm btn-danger" onclick="cancelJob('${j.job_id}')" title="Anulează">■</button>`:''}
+          ${j.status==='completed'?`<button class="btn btn-sm btn-secondary" onclick="window.open('/api/jobs/${j.job_id}/download')" title="Descarcă">⬇</button>`:''}
+          ${isFinished?`<button class="btn btn-sm btn-danger" onclick="deleteJob('${j.job_id}')" title="Șterge">✕</button>`:''}
+        </div>
       </div>
-      ${statsRow}
       ${logPanel}
     </div>`;
   }).join('');
@@ -1471,13 +1510,13 @@ function renderJobsFromCache() {
 }
 
 async function deleteJob(id) {
-  if (!confirm('Sigur dori\u021bi s\u0103 \u0219terge\u021bi acest job \u0219i fi\u0219ierele asociate?')) return;
+  if (!confirm('Sigur doriți să ștergeți acest job și fișierele asociate?')) return;
   try {
     await fetch(`/api/jobs/${id}`, {method:'DELETE'});
-    toast('Job \u0219ters cu succes', 'success');
+    toast('Job șters cu succes', 'success');
     loadJobs();
   } catch (e) {
-    toast('Eroare la \u0219tergere: ' + e.message, 'error');
+    toast('Eroare la ștergere: ' + e.message, 'error');
   }
 }
 
@@ -1660,7 +1699,7 @@ function copyTTOutput() {
   if (!el || el.classList.contains('placeholder')) return;
   const text = el.textContent || el.innerText;
   navigator.clipboard.writeText(text).then(() => {
-    toast('Traducerea a fost copiata!', 'success');
+    toast('Traducerea a fost copiată!', 'success');
   }).catch(() => {
     // Fallback
     const ta = document.createElement('textarea');
@@ -1669,14 +1708,14 @@ function copyTTOutput() {
     ta.select();
     document.execCommand('copy');
     document.body.removeChild(ta);
-    toast('Traducerea a fost copiata!', 'success');
+    toast('Traducerea a fost copiată!', 'success');
   });
 }
 
 async function translateText() {
   const text = $('ttInput').value.trim();
   if (!text) {
-    toast('Introduceti textul de tradus', 'error');
+    toast('Introduceți textul de tradus', 'error');
     return;
   }
 
