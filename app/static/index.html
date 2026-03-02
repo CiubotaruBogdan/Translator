@@ -300,6 +300,10 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         <svg viewBox="0 0 24 24"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
         Traducere text
       </div>
+      <div class="nav-item" data-page="ocr" onclick="showPage('ocr')">
+        <svg viewBox="0 0 24 24"><path d="M9.5 6.5v3h-3v-3h3M11 5H5v6h6V5zm-1.5 9.5v3h-3v-3h3M11 13H5v6h6v-6zm6.5-6.5v3h-3v-3h3M19 5h-6v6h6V5zm-6 8h1.5v1.5H13V13zm1.5 1.5H16V16h-1.5v-1.5zM16 13h1.5v1.5H16V13zm-3 3h1.5v1.5H13V16zm1.5 1.5H16V19h-1.5v-1.5zM16 16h1.5v1.5H16V16zm1.5-1.5H19V16h-1.5v-1.5zm0 3H19V19h-1.5v-1.5zM22 7h-2V4h-3V2h5v5zm0 15v-5h-2v3h-3v2h5zM2 22h5v-2H4v-3H2v5zM2 2v5h2V4h3V2H2z"/></svg>
+        OCR
+      </div>
       <div class="nav-item" data-page="jobs" onclick="showPage('jobs')">
         <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM7 10h2v7H7zm4-3h2v10h-2zm4 6h2v4h-2z"/></svg>
         Job-uri
@@ -544,6 +548,75 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         </div>
         <div class="card-body" id="dashClientsList">
           <div style="color:var(--text3);font-size:13px">Niciun client conectat</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== PAGE: OCR ==================== -->
+    <div class="page" id="page-ocr">
+      <h2 class="page-title">OCR — Extragere text</h2>
+
+      <!-- OCR Status -->
+      <div class="stats-row" style="margin-bottom:16px">
+        <div class="stat-card">
+          <div class="stat-icon blue"><svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:#fff"><path d="M9.5 6.5v3h-3v-3h3M11 5H5v6h6V5zm-1.5 9.5v3h-3v-3h3M11 13H5v6h6v-6zm6.5-6.5v3h-3v-3h3M19 5h-6v6h6V5z"/></svg></div>
+          <div class="stat-label">Tesseract OCR</div>
+          <div class="stat-value" id="ocrTesseractStatus" style="font-size:16px">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon green"><svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:#fff"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg></div>
+          <div class="stat-label">Export PDF</div>
+          <div class="stat-value" id="ocrPdfStatus" style="font-size:16px">--</div>
+        </div>
+      </div>
+
+      <!-- Upload -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Încarcă fișier pentru OCR</span>
+          <span class="badge blue" style="font-size:11px">PDF · DOCX · Imagini</span>
+        </div>
+        <div class="card-body">
+          <div class="form-group" style="margin-bottom:12px">
+            <label class="form-label">Limba documentului</label>
+            <select class="form-control" id="ocrLang" style="max-width:200px"></select>
+          </div>
+          <div class="upload-zone" id="ocrUploadZone">
+            <svg viewBox="0 0 24 24"><path d="M9.5 6.5v3h-3v-3h3M11 5H5v6h6V5zm-1.5 9.5v3h-3v-3h3M11 13H5v6h6v-6zm6.5-6.5v3h-3v-3h3M19 5h-6v6h6V5zm-6 8h1.5v1.5H13V13zm1.5 1.5H16V16h-1.5v-1.5zM16 13h1.5v1.5H16V13zm-3 3h1.5v1.5H13V16zm1.5 1.5H16V19h-1.5v-1.5zM16 16h1.5v1.5H16V16zm1.5-1.5H19V16h-1.5v-1.5zm0 3H19V19h-1.5v-1.5zM22 7h-2V4h-3V2h5v5zm0 15v-5h-2v3h-3v2h5zM2 22h5v-2H4v-3H2v5zM2 2v5h2V4h3V2H2z"/></svg>
+            <p>Trageți fișierul aici sau click pentru a selecta</p>
+            <div class="hint">PDF scanat, DOCX, PNG, JPG, TIFF, BMP, WebP</div>
+          </div>
+          <input type="file" id="ocrFileInput" accept=".pdf,.docx,.png,.jpg,.jpeg,.tiff,.tif,.bmp,.webp" style="display:none">
+          <div id="ocrSelectedFile" style="margin-top:10px"></div>
+        </div>
+      </div>
+
+      <!-- OCR Button -->
+      <div style="text-align:center;margin-bottom:16px">
+        <button class="btn btn-primary" id="ocrRunBtn" onclick="runOCR()">
+          <svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M9.5 6.5v3h-3v-3h3M11 5H5v6h6V5zm-1.5 9.5v3h-3v-3h3M11 13H5v6h6v-6zm6.5-6.5v3h-3v-3h3M19 5h-6v6h6V5z"/></svg>
+          Extrage text (OCR)
+        </button>
+      </div>
+
+      <!-- OCR Result -->
+      <div class="card" id="ocrResultCard" style="display:none">
+        <div class="card-header">
+          <span class="card-title" id="ocrResultTitle">Rezultat OCR</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span class="badge green" id="ocrCharCount">0 caractere</span>
+            <button class="btn btn-sm btn-primary" id="ocrDownloadBtn" onclick="downloadOCR()">
+              <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              Descarcă PDF
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="copyOCRText()">
+              <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:currentColor"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+              Copiază
+            </button>
+          </div>
+        </div>
+        <div class="card-body">
+          <pre id="ocrResultText" style="white-space:pre-wrap;word-wrap:break-word;font-family:inherit;font-size:14px;line-height:1.7;color:var(--text);max-height:500px;overflow-y:auto;margin:0"></pre>
         </div>
       </div>
     </div>
@@ -1830,9 +1903,131 @@ function escHtml(s) {
 }
 
 // ============================================================
+// OCR PAGE
+// ============================================================
+let ocrFile = null;
+let ocrDownloadUrl = null;
+
+function setupOCR() {
+  const zone = $('ocrUploadZone'), input = $('ocrFileInput');
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) selectOCRFile(e.dataTransfer.files[0]);
+  });
+  input.addEventListener('change', e => {
+    if (e.target.files.length) selectOCRFile(e.target.files[0]);
+    input.value = '';
+  });
+
+  // Populate language dropdown
+  const sel = $('ocrLang');
+  ALL_LANGS.forEach(l => sel.add(new Option(l.n, l.c)));
+  sel.value = 'ro';
+
+  // Check OCR status
+  checkOCRStatus();
+}
+
+function selectOCRFile(file) {
+  const allowed = ['pdf','docx','png','jpg','jpeg','tiff','tif','bmp','webp'];
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (!allowed.includes(ext)) {
+    toast('Format nesuportat: ' + file.name, 'error');
+    return;
+  }
+  ocrFile = file;
+  $('ocrSelectedFile').innerHTML = `<div class="file-item">
+    <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+    <div class="file-item-info">
+      <div class="file-item-name">${file.name}</div>
+      <div class="file-item-size">${fmtBytes(file.size)}</div>
+    </div>
+    <button class="file-item-remove" onclick="clearOCRFile()" title="Elimină">
+      <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+    </button>
+  </div>`;
+}
+
+function clearOCRFile() {
+  ocrFile = null;
+  $('ocrSelectedFile').innerHTML = '';
+}
+
+async function checkOCRStatus() {
+  try {
+    const resp = await fetch('/api/ocr/status');
+    const data = await resp.json();
+    $('ocrTesseractStatus').textContent = data.tesseract_available ? 'Disponibil' : 'Indisponibil';
+    $('ocrTesseractStatus').style.color = data.tesseract_available ? 'var(--green)' : 'var(--red)';
+    const lo = data.libreoffice || {};
+    $('ocrPdfStatus').textContent = lo.available ? 'Disponibil' : 'Indisponibil';
+    $('ocrPdfStatus').style.color = lo.available ? 'var(--green)' : 'var(--red)';
+  } catch(e) {
+    $('ocrTesseractStatus').textContent = 'Eroare';
+    $('ocrPdfStatus').textContent = 'Eroare';
+  }
+}
+
+async function runOCR() {
+  if (!ocrFile) {
+    toast('Selectați un fișier pentru OCR', 'error');
+    return;
+  }
+
+  const btn = $('ocrRunBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Se procesează...';
+  $('ocrResultCard').style.display = 'none';
+
+  const formData = new FormData();
+  formData.append('file', ocrFile);
+  formData.append('lang', $('ocrLang').value);
+
+  try {
+    const resp = await fetch('/api/ocr', { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.detail || 'Eroare OCR');
+    }
+    const data = await resp.json();
+
+    $('ocrResultCard').style.display = '';
+    $('ocrResultTitle').textContent = 'Rezultat OCR: ' + data.filename;
+    $('ocrCharCount').textContent = data.char_count.toLocaleString() + ' caractere';
+    $('ocrResultText').textContent = data.text;
+    ocrDownloadUrl = data.download_url;
+
+    toast('OCR finalizat! ' + data.char_count.toLocaleString() + ' caractere extrase.', 'success');
+  } catch(e) {
+    toast('Eroare OCR: ' + e.message, 'error');
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '<svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M9.5 6.5v3h-3v-3h3M11 5H5v6h6V5zm-1.5 9.5v3h-3v-3h3M11 13H5v6h6v-6zm6.5-6.5v3h-3v-3h3M19 5h-6v6h6V5z"/></svg> Extrage text (OCR)';
+}
+
+function downloadOCR() {
+  if (ocrDownloadUrl) window.open(ocrDownloadUrl);
+}
+
+function copyOCRText() {
+  const text = $('ocrResultText').textContent;
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    toast('Text copiat!', 'success');
+  }).catch(() => {
+    toast('Nu s-a putut copia', 'error');
+  });
+}
+
+// ============================================================
 // START
 // ============================================================
 init();
+setupOCR();
 </script>
 </body>
 </html>

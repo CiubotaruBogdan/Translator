@@ -1434,6 +1434,149 @@ async def api_cleanup_files():
     app_logger.warning(f"Cleanup: {deleted} files deleted")
     return {"ok": True, "deleted": deleted}
 
+# ============================================================
+# OCR Standalone Endpoint
+# ============================================================
+
+TESS_LANG_MAP = {
+    'ro': 'ron', 'en': 'eng', 'fr': 'fra', 'de': 'deu',
+    'es': 'spa', 'it': 'ita', 'pt': 'por', 'nl': 'nld',
+    'pl': 'pol', 'ru': 'rus', 'uk': 'ukr', 'bg': 'bul',
+    'hr': 'hrv', 'cs': 'ces', 'sk': 'slk', 'hu': 'hun',
+    'el': 'ell', 'tr': 'tur', 'ar': 'ara', 'ja': 'jpn',
+    'ko': 'kor', 'zh-Hans': 'chi_sim', 'zh-Hant': 'chi_tra'
+}
+
+@app.post("/api/ocr")
+async def api_ocr(
+    file: UploadFile = File(...),
+    lang: str = Form("ro"),
+):
+    """Standalone OCR: extract text from PDF, DOCX, or image files.
+    For PDF/DOCX input, returns a downloadable PDF with extracted text.
+    For images, returns extracted text as JSON + downloadable PDF."""
+    if not TESSERACT_AVAILABLE:
+        raise HTTPException(500, "Tesseract OCR nu este disponibil pe server.")
+
+    ext = Path(file.filename).suffix.lower()
+    allowed = ('.pdf', '.docx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.webp')
+    if ext not in allowed:
+        raise HTTPException(400, f"Format nesuportat: {ext}. Acceptate: {', '.join(allowed)}")
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(400, f"Fișier prea mare (max {MAX_FILE_SIZE // 1024 // 1024}MB)")
+
+    ocr_id = str(uuid.uuid4())[:8]
+    input_path = UPLOAD_DIR / f"ocr_{ocr_id}{ext}"
+    input_path.write_bytes(content)
+
+    tess_lang = TESS_LANG_MAP.get(lang, 'eng')
+    if tess_lang != 'eng':
+        tess_lang = f"{tess_lang}+eng"
+
+    extracted_text = ""
+    try:
+        if ext == '.pdf':
+            # PDF -> OCR each page
+            from pdf2image import convert_from_path
+            images = convert_from_path(str(input_path), dpi=300)
+            pages_text = []
+            for i, img in enumerate(images):
+                text = pytesseract.image_to_string(img, lang=tess_lang)
+                pages_text.append(text.strip())
+            extracted_text = "\n\n--- Pagina {} ---\n\n".join(
+                ["" for _ in range(len(pages_text) + 1)]
+            )  # placeholder
+            # Build proper page-separated text
+            parts = []
+            for i, pt in enumerate(pages_text):
+                parts.append(f"--- Pagina {i+1} ---\n\n{pt}")
+            extracted_text = "\n\n".join(parts)
+
+        elif ext == '.docx':
+            # DOCX -> extract text from paragraphs (already digital text)
+            doc_obj = docx.Document(str(input_path))
+            paragraphs = [p.text for p in doc_obj.paragraphs if p.text.strip()]
+            extracted_text = "\n\n".join(paragraphs)
+
+        else:
+            # Image file -> OCR directly
+            img = Image.open(str(input_path))
+            extracted_text = pytesseract.image_to_string(img, lang=tess_lang)
+
+    except Exception as e:
+        # Cleanup
+        try:
+            input_path.unlink()
+        except:
+            pass
+        raise HTTPException(500, f"Eroare OCR: {str(e)}")
+
+    # Create output DOCX then convert to PDF
+    out_docx_path = OUTPUT_DIR / f"ocr_{ocr_id}_result.docx"
+    doc_out = docx.Document()
+    doc_out.add_heading(f"OCR: {file.filename}", level=1)
+    for para in extracted_text.split("\n\n"):
+        cleaned = para.strip()
+        if cleaned:
+            doc_out.add_paragraph(cleaned)
+    doc_out.save(str(out_docx_path))
+
+    # Convert DOCX to PDF
+    pdf_output_name = f"ocr_{ocr_id}_result.pdf"
+    pdf_output_path = None
+    try:
+        pdf_output_path = convert_docx_to_pdf_libreoffice(out_docx_path, OUTPUT_DIR)
+        # Rename to standard name
+        final_pdf = OUTPUT_DIR / pdf_output_name
+        if pdf_output_path != final_pdf:
+            pdf_output_path.rename(final_pdf)
+        pdf_output_path = final_pdf
+    except Exception as e:
+        app_logger.warning(f"OCR PDF conversion failed: {e}, falling back to DOCX")
+        pdf_output_path = None
+
+    # Cleanup input
+    try:
+        input_path.unlink()
+    except:
+        pass
+
+    download_file = pdf_output_path if pdf_output_path and pdf_output_path.exists() else out_docx_path
+    download_name = Path(file.filename).stem + "_ocr.pdf" if pdf_output_path and pdf_output_path.exists() else Path(file.filename).stem + "_ocr.docx"
+
+    return {
+        "ocr_id": ocr_id,
+        "filename": file.filename,
+        "text": extracted_text,
+        "char_count": len(extracted_text),
+        "download_url": f"/api/ocr/{ocr_id}/download",
+        "download_name": download_name
+    }
+
+@app.get("/api/ocr/{ocr_id}/download")
+async def api_ocr_download(ocr_id: str):
+    """Download OCR result file."""
+    # Try PDF first, then DOCX
+    pdf_path = OUTPUT_DIR / f"ocr_{ocr_id}_result.pdf"
+    docx_path = OUTPUT_DIR / f"ocr_{ocr_id}_result.docx"
+    if pdf_path.exists():
+        return FileResponse(str(pdf_path), filename=f"ocr_result.pdf",
+                            media_type="application/pdf")
+    elif docx_path.exists():
+        return FileResponse(str(docx_path), filename=f"ocr_result.docx",
+                            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    raise HTTPException(404, "Fișierul OCR nu a fost găsit.")
+
+@app.get("/api/ocr/status")
+async def api_ocr_status():
+    """Check OCR availability."""
+    return {
+        "tesseract_available": TESSERACT_AVAILABLE,
+        "libreoffice": check_libreoffice_available()
+    }
+
 @app.get("/api/libreoffice")
 async def api_libreoffice():
     return check_libreoffice_available()
