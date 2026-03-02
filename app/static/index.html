@@ -1411,19 +1411,26 @@ function renderJobs(jobsList) {
     const totalChars = live.total_chars ? live.total_chars.toLocaleString() : '0';
     const elapsed = live.elapsed_seconds ? fmtDuration(live.elapsed_seconds) : '--';
 
-    // Calculate running time from created_at
+    // Calculate running time — prefer server-side elapsed_seconds (no timezone issues)
     let runningTime = '--';
-    try {
-      const created = new Date(j.created_at);
-      const now = new Date();
-      const runningSec = Math.round((now - created) / 1000);
-      if (isFinished && j.completed_at) {
-        const completed = new Date(j.completed_at);
-        runningTime = fmtDuration(Math.round((completed - created) / 1000));
-      } else if (!isNaN(runningSec)) {
-        runningTime = fmtDuration(runningSec);
-      }
-    } catch(e) {}
+    if (live.elapsed_seconds != null && live.elapsed_seconds > 0) {
+      runningTime = fmtDuration(live.elapsed_seconds);
+    } else if (j.elapsed_seconds != null && j.elapsed_seconds > 0) {
+      runningTime = fmtDuration(j.elapsed_seconds);
+    } else if (!isFinished) {
+      // For active jobs without elapsed_seconds, calculate from created_at
+      try {
+        // Append 'Z' only if no timezone info, to treat as UTC; but server uses local time
+        // so we parse without timezone suffix to get local interpretation
+        const createdStr = j.created_at;
+        const created = new Date(createdStr.includes('T') && !createdStr.includes('Z') && !createdStr.includes('+') ? createdStr : createdStr);
+        const now = new Date();
+        const runningSec = Math.round((now - created) / 1000);
+        if (!isNaN(runningSec) && runningSec >= 0) {
+          runningTime = fmtDuration(runningSec);
+        }
+      } catch(e) {}
+    }
 
     // Events from SSE data
     const events = live.events || j.events || [];
@@ -1635,6 +1642,7 @@ function updateDashboard(d) {
 
 function fmtDuration(s) {
   s = Math.round(s);
+  if (s < 0) return '--';
   if (s < 60) return s + 's';
   if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
   const h = Math.floor(s/3600);
