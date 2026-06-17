@@ -220,8 +220,19 @@ class TranslationJob:
         self.chunks = []            # for TXT/PDF
         self.translated_chunks = [] # for TXT/PDF
         self.docx_segments = []     # for DOCX format-preserving
+        self.source_segments = []   # clean original text per segment (for review)
         self.events = []
         self.cancelled = False
+        # --- LLM review state ---
+        self.review_status = None       # None | 'running' | 'completed' | 'failed'
+        self.review_model = None
+        self.review_progress = 0.0
+        self.review_total = 0
+        self.review_done = 0
+        self.review_results = []        # list of per-segment review dicts
+        self.review_summary = None      # {ok, minor, major, errors, avg_score}
+        self.review_error = None
+        self.review_cancel = False
 
     def add_event(self, etype, message, detail=""):
         self.events.append({
@@ -269,6 +280,15 @@ class TranslationJob:
             "batch_size": self.batch_size,
             "keep_alive": self.keep_alive,
             "chunk_size": self.chunk_size,
+            "review": {
+                "status": self.review_status,
+                "model": self.review_model,
+                "progress": round(self.review_progress, 1),
+                "total": self.review_total,
+                "done": self.review_done,
+                "summary": self.review_summary,
+                "error": self.review_error,
+            },
             "events": self.events[-100:]
         }
 
@@ -1086,6 +1106,9 @@ async def run_pipeline(job: TranslationJob):
             job.add_event("info", "Chunking complete",
                           f"{len(chunks_to_translate)} chunks (max {job.chunk_size} chars/chunk)")
 
+        # Keep clean source text per segment for the optional LLM review step
+        job.source_segments = [INLINE_MARKER_RE.sub("", c["text"]) for c in chunks_to_translate]
+
         engine_info = f"engine={job.engine}"
         if job.engine == 'libretranslate':
             engine_info += f", url={job.libretranslate_url}"
@@ -1346,6 +1369,207 @@ def assemble_txt(job, out_name):
                 f.write(translated + "\n\n")
 
 # ============================================================
+# LLM Translation Review (second-pass quality check via Ollama)
+# ============================================================
+
+def _parse_review_json(raw: str) -> dict:
+    """Robustly parse the reviewer model's JSON output."""
+    data = None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        # Try to extract the first {...} block
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = None
+    if not isinstance(data, dict):
+        return {"verdict": "unknown", "score": None, "issues": [],
+                "suggestion": "", "raw": raw[:500]}
+    verdict = str(data.get("verdict", "unknown")).lower().strip()
+    if verdict not in ("ok", "minor", "major"):
+        verdict = "unknown"
+    issues = data.get("issues", [])
+    if isinstance(issues, str):
+        issues = [issues]
+    elif not isinstance(issues, list):
+        issues = []
+    issues = [str(i).strip() for i in issues if str(i).strip()]
+    score = data.get("score")
+    try:
+        score = int(score) if score is not None else None
+    except Exception:
+        score = None
+    suggestion = data.get("suggestion") or data.get("improved") or ""
+    return {"verdict": verdict, "score": score,
+            "issues": issues, "suggestion": str(suggestion).strip()}
+
+
+async def review_segment(session, src_text, tgt_text, src, tgt, model, url,
+                         num_ctx=DEFAULT_NUM_CTX, keep_alive=DEFAULT_KEEP_ALIVE,
+                         job_id=None):
+    """Ask a general LLM to review one source/translation pair. Returns a dict."""
+    src_name = LANG_EN.get(src, src)
+    tgt_name = LANG_EN.get(tgt, tgt)
+    prompt = (
+        f"You are a senior bilingual translation reviewer ({src_name} into {tgt_name}). "
+        f"Compare the SOURCE with its TRANSLATION and judge the translation's quality: "
+        f"accuracy, completeness (no omissions/additions), terminology, grammar, "
+        f"and natural fluency in {tgt_name}.\n"
+        f"Respond ONLY with a JSON object, no other text, using exactly these keys:\n"
+        f'{{"verdict": "ok" | "minor" | "major", "score": <integer 1-5>, '
+        f'"issues": [<short strings describing problems, in {tgt_name}>], '
+        f'"suggestion": "<an improved {tgt_name} translation, or empty string if none needed>"}}\n'
+        f'Use "ok" when the translation is faithful and natural, "minor" for small '
+        f'style/grammar issues, "major" for meaning errors or omissions. '
+        f'Leave "suggestion" empty when verdict is "ok".\n\n'
+        f"SOURCE ({src_name}):\n{src_text}\n\n"
+        f"TRANSLATION ({tgt_name}):\n{tgt_text}"
+    )
+    payload = {"model": model, "prompt": prompt, "stream": False, "format": "json",
+               "options": {"num_ctx": num_ctx, "temperature": 0}, "keep_alive": keep_alive}
+    last_err = None
+    start = time.time()
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            async with session.post(f"{url}/api/generate", json=payload,
+                                    timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                if resp.status != 200:
+                    err = await resp.text()
+                    raise Exception(f"HTTP {resp.status}: {err[:200]}")
+                data = await resp.json()
+                raw = data.get("response", "").strip()
+                if not raw:
+                    raise Exception("Empty response from model")
+                record_exchange(job_id, "ollama", model, src, tgt, "review",
+                                prompt, raw, attempt, time.time() - start)
+                parsed = _parse_review_json(raw)
+                parsed["attempts"] = attempt
+                return parsed
+        except Exception as e:
+            last_err = e
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY * attempt)
+    record_exchange(job_id, "ollama", model, src, tgt, "review",
+                    prompt, "", MAX_RETRIES, time.time() - start, error=str(last_err))
+    raise Exception(f"Review failed after {MAX_RETRIES} attempts: {last_err}")
+
+
+async def run_review(job: TranslationJob, model: str, url: str,
+                     num_ctx: int = DEFAULT_NUM_CTX, concurrency: int = DEFAULT_CONCURRENCY,
+                     keep_alive: str = DEFAULT_KEEP_ALIVE):
+    """Review every translated segment of a completed job with a general LLM."""
+    try:
+        job.review_status = "running"
+        job.review_model = model
+        job.review_error = None
+        job.review_cancel = False
+        job.review_results = []
+        job.review_done = 0
+        job.review_progress = 0.0
+
+        # Build aligned (index, source, translation) pairs, skipping empties/errors
+        sources = job.source_segments or []
+        pairs = []
+        for i, trans in enumerate(job.translated_chunks):
+            clean_trans = INLINE_MARKER_RE.sub("", trans or "").strip()
+            src_text = INLINE_MARKER_RE.sub("", sources[i]).strip() if i < len(sources) else ""
+            if not clean_trans or clean_trans.startswith("[TRANSLATION ERROR"):
+                continue
+            if not src_text:
+                continue
+            pairs.append((i, src_text, clean_trans))
+
+        job.review_total = len(pairs)
+        if not pairs:
+            job.review_status = "failed"
+            job.review_error = "Nu există segmente traduse pentru verificare."
+            emit(job)
+            return
+
+        job.add_event("info", "Verificare LLM pornită",
+                      f"{len(pairs)} segmente, model={model}")
+        emit(job)
+
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+        lock = asyncio.Lock()
+        results = {}
+
+        async with aiohttp.ClientSession() as session:
+            # Verify model/endpoint reachable
+            try:
+                async with session.get(f"{url}/api/tags",
+                                       timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status != 200:
+                        raise Exception(f"HTTP {r.status}")
+            except Exception as e:
+                job.review_status = "failed"
+                job.review_error = f"Nu mă pot conecta la Ollama ({url}): {e}"
+                job.add_event("error", "Verificare eșuată", job.review_error)
+                emit(job)
+                return
+
+            async def review_one(i, src_text, tgt_text):
+                if job.review_cancel:
+                    return
+                async with semaphore:
+                    if job.review_cancel:
+                        return
+                    try:
+                        parsed = await review_segment(
+                            session, src_text, tgt_text, job.source_lang,
+                            job.target_lang, model, url, num_ctx=num_ctx,
+                            keep_alive=keep_alive, job_id=job.job_id)
+                    except Exception as e:
+                        parsed = {"verdict": "error", "score": None, "issues": [str(e)],
+                                  "suggestion": ""}
+                    async with lock:
+                        results[i] = {
+                            "index": i,
+                            "source": src_text,
+                            "translation": tgt_text,
+                            "verdict": parsed.get("verdict", "unknown"),
+                            "score": parsed.get("score"),
+                            "issues": parsed.get("issues", []),
+                            "suggestion": parsed.get("suggestion", ""),
+                        }
+                        job.review_done += 1
+                        job.review_progress = 100.0 * job.review_done / job.review_total
+                        emit(job)
+
+            await asyncio.gather(*[review_one(i, s, t) for i, s, t in pairs])
+
+        if job.review_cancel:
+            job.review_status = "cancelled"
+            job.add_event("warning", "Verificare anulată")
+            emit(job)
+            return
+
+        job.review_results = [results[k] for k in sorted(results.keys())]
+        ok = sum(1 for r in job.review_results if r["verdict"] == "ok")
+        minor = sum(1 for r in job.review_results if r["verdict"] == "minor")
+        major = sum(1 for r in job.review_results if r["verdict"] == "major")
+        errors = sum(1 for r in job.review_results if r["verdict"] in ("error", "unknown"))
+        scores = [r["score"] for r in job.review_results if isinstance(r["score"], int)]
+        avg_score = round(sum(scores) / len(scores), 2) if scores else None
+        job.review_summary = {"ok": ok, "minor": minor, "major": major,
+                              "errors": errors, "avg_score": avg_score,
+                              "total": len(job.review_results)}
+        job.review_status = "completed"
+        job.review_progress = 100.0
+        job.add_event("success", "Verificare finalizată",
+                      f"{ok} ok · {minor} minore · {major} majore"
+                      + (f" · scor mediu {avg_score}/5" if avg_score else ""))
+        emit(job)
+    except Exception as e:
+        job.review_status = "failed"
+        job.review_error = str(e)
+        job.add_event("error", "Verificare eșuată", str(e))
+        emit(job)
+
+# ============================================================
 # SSE
 # ============================================================
 
@@ -1507,6 +1731,92 @@ async def api_cancel(job_id: str):
         raise HTTPException(404)
     jobs[job_id].cancelled = True
     return {"ok": True}
+
+
+class ReviewRequest(BaseModel):
+    model: str = ""
+    ollama_url: str = ""
+    num_ctx: int = DEFAULT_NUM_CTX
+    concurrency: int = DEFAULT_CONCURRENCY
+    keep_alive: str = DEFAULT_KEEP_ALIVE
+
+
+@app.post("/api/jobs/{job_id}/review")
+async def api_review(job_id: str, req: ReviewRequest):
+    """Start an LLM second-pass review of a completed job's translations."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    job = jobs[job_id]
+    if job.status != JobStatus.COMPLETED:
+        raise HTTPException(400, "Jobul trebuie să fie finalizat înainte de verificare.")
+    if not any(job.translated_chunks):
+        raise HTTPException(400, "Jobul nu are traduceri de verificat.")
+    if job.review_status == "running":
+        raise HTTPException(409, "O verificare este deja în curs pentru acest job.")
+    model = (req.model or "").strip() or job.model or DEFAULT_MODEL
+    url = (req.ollama_url or "").strip() or job.ollama_url or DEFAULT_OLLAMA_URL
+    num_ctx = max(512, min(req.num_ctx, 32768))
+    concurrency = max(1, min(req.concurrency, 10))
+    asyncio.create_task(run_review(job, model, url, num_ctx=num_ctx,
+                                   concurrency=concurrency, keep_alive=req.keep_alive))
+    return {"ok": True, "model": model, "total": len(job.source_segments)}
+
+
+@app.get("/api/jobs/{job_id}/review")
+async def api_review_results(job_id: str):
+    """Return the review progress and per-segment results for a job."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    job = jobs[job_id]
+    return {
+        "job_id": job_id,
+        "status": job.review_status,
+        "model": job.review_model,
+        "progress": round(job.review_progress, 1),
+        "total": job.review_total,
+        "done": job.review_done,
+        "summary": job.review_summary,
+        "error": job.review_error,
+        "results": job.review_results,
+    }
+
+
+@app.post("/api/jobs/{job_id}/review/cancel")
+async def api_review_cancel(job_id: str):
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    jobs[job_id].review_cancel = True
+    return {"ok": True}
+
+
+class ReviewTextRequest(BaseModel):
+    source_text: str
+    translated_text: str
+    source_lang: str = "ro"
+    target_lang: str = "en"
+    model: str = ""
+    ollama_url: str = ""
+    num_ctx: int = DEFAULT_NUM_CTX
+
+
+@app.post("/api/review-text")
+async def api_review_text(req: ReviewTextRequest):
+    """Ad-hoc review of a single source/translation pair (used by the text page)."""
+    src_text = (req.source_text or "").strip()
+    tgt_text = (req.translated_text or "").strip()
+    if not src_text or not tgt_text:
+        raise HTTPException(400, "Sursa și traducerea sunt obligatorii.")
+    model = (req.model or "").strip() or DEFAULT_MODEL
+    url = (req.ollama_url or "").strip() or DEFAULT_OLLAMA_URL
+    num_ctx = max(512, min(req.num_ctx, 32768))
+    try:
+        async with aiohttp.ClientSession() as session:
+            parsed = await review_segment(session, src_text, tgt_text,
+                                          req.source_lang, req.target_lang,
+                                          model, url, num_ctx=num_ctx, job_id="text")
+        return {"ok": True, "model": model, "review": parsed}
+    except Exception as e:
+        raise HTTPException(500, f"Verificare eșuată: {e}")
 
 @app.get("/api/jobs/{job_id}/download")
 async def api_download(job_id: str):
