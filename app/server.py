@@ -161,6 +161,13 @@ async def serve_logs_page():
         return FileResponse(str(logs_path), media_type="text/html")
     raise HTTPException(404, "Logs page not found")
 
+@app.get("/prompts.html")
+async def serve_prompts_page():
+    page = BASE_DIR / "static" / "prompts.html"
+    if page.exists():
+        return FileResponse(str(page), media_type="text/html")
+    raise HTTPException(404, "Prompts page not found")
+
 # ============================================================
 # Global State
 # ============================================================
@@ -270,6 +277,38 @@ jobs: dict[str, TranslationJob] = {}
 sse_queues: dict[str, list[asyncio.Queue]] = {}
 connected_clients: dict[str, dict] = {}
 server_start_time = datetime.now()
+
+# ============================================================
+# Prompt / Response history ("CMD" istoric)
+# Records the exact request sent to the translation engine and the
+# raw response received, for debugging and transparency.
+# ============================================================
+
+prompt_log: deque = deque(maxlen=1000)
+
+def record_exchange(job_id, engine, model, src, tgt, kind,
+                    prompt, response, attempts, duration, error=None):
+    """Store one translation request/response exchange in the history."""
+    try:
+        prompt_log.append({
+            "id": str(uuid.uuid4())[:8],
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "job_id": job_id or "-",
+            "engine": engine,
+            "model": model or "-",
+            "src": src,
+            "tgt": tgt,
+            "kind": kind,                       # 'single' | 'batch' | 'libretranslate'
+            "prompt": prompt or "",
+            "response": response or "",
+            "prompt_chars": len(prompt or ""),
+            "response_chars": len(response or ""),
+            "attempts": attempts,
+            "duration_ms": round((duration or 0) * 1000),
+            "error": error,
+        })
+    except Exception:
+        pass
 
 # ============================================================
 # WebSocket for Dashboard
@@ -445,6 +484,48 @@ async def startup():
 # DOCX Format-Preserving Extraction
 # ============================================================
 
+# Inline markers used to preserve mid-paragraph formatting (bold/italic/color).
+# A paragraph with multiple differently-formatted run groups is sent to the
+# engine as: ⟦0⟧text-of-group-0⟦1⟧text-of-group-1...
+# The engine is instructed to keep the markers; we then redistribute the
+# translated text back into the original runs, preserving each run's format.
+INLINE_MARKER_RE = re.compile(r"⟦\d+⟧")  # ⟦n⟧
+
+
+def _run_format_signature(run):
+    """A hashable signature of a run's formatting used to group adjacent runs."""
+    font = run.font
+    try:
+        color = str(font.color.rgb) if (font.color is not None and font.color.type is not None) else None
+    except Exception:
+        color = None
+    try:
+        size = font.size.pt if font.size is not None else None
+    except Exception:
+        size = None
+    return (run.bold, run.italic, run.underline, font.name, size, color)
+
+
+def _paragraph_format_groups(para) -> list[dict]:
+    """
+    Group consecutive non-empty runs that share identical formatting.
+    Word frequently splits a single visual span into several runs, so merging
+    same-format runs makes inline-formatting preservation far more robust.
+    Returns a list of {sig, run_indices, text}.
+    """
+    groups = []
+    for ri, run in enumerate(para.runs):
+        if run.text == "":
+            continue
+        sig = _run_format_signature(run)
+        if groups and groups[-1]["sig"] == sig:
+            groups[-1]["run_indices"].append(ri)
+            groups[-1]["text"] += run.text
+        else:
+            groups.append({"sig": sig, "run_indices": [ri], "text": run.text})
+    return groups
+
+
 def extract_docx_segments(filepath: Path) -> list[dict]:
     """
     Extract translatable segments from DOCX while preserving structure info.
@@ -459,9 +540,18 @@ def extract_docx_segments(filepath: Path) -> list[dict]:
     for pi, para in enumerate(doc.paragraphs):
         full_text = para.text.strip()
         if full_text:
+            groups = _paragraph_format_groups(para)
+            if len(groups) > 1:
+                # Mixed formatting -> tag each group so we can restore it later
+                seg_text = "".join(f"⟦{i}⟧{g['text']}" for i, g in enumerate(groups))
+                multi_run = True
+            else:
+                seg_text = full_text
+                multi_run = False
             segments.append({
                 "index": idx, "type": "paragraph", "para_index": pi,
-                "text": full_text, "char_count": len(full_text)
+                "text": seg_text, "char_count": len(full_text),
+                "multi_run": multi_run
             })
             idx += 1
 
@@ -489,7 +579,7 @@ def apply_translations_to_docx(filepath: Path, segments: list[dict],
     """
     doc = docx.Document(str(filepath))
 
-    # Build lookup: para_index -> translated text
+    # Build lookup: para_index -> (translated text, multi_run flag)
     para_translations = {}
     cell_translations = {}
 
@@ -497,15 +587,16 @@ def apply_translations_to_docx(filepath: Path, segments: list[dict],
         if not trans or trans.startswith("[TRANSLATION ERROR"):
             continue
         if seg["type"] == "paragraph":
-            para_translations[seg["para_index"]] = trans
+            para_translations[seg["para_index"]] = (trans, seg.get("multi_run", False))
         elif seg["type"] == "table_cell":
             key = (seg["table_index"], seg["row_index"], seg["cell_index"])
             cell_translations[key] = trans
 
-    # Replace paragraph text preserving runs
+    # Replace paragraph text preserving runs (and inline formatting when tagged)
     for pi, para in enumerate(doc.paragraphs):
         if pi in para_translations:
-            _replace_paragraph_text(para, para_translations[pi])
+            trans, multi_run = para_translations[pi]
+            _apply_paragraph_translation(para, trans, multi_run)
 
     # Replace table cell text preserving runs
     for ti, table in enumerate(doc.tables):
@@ -523,11 +614,55 @@ def apply_translations_to_docx(filepath: Path, segments: list[dict],
     doc.save(str(output_path))
 
 
+def _apply_paragraph_translation(para, new_text: str, multi_run: bool):
+    """
+    Reinsert translated text into a paragraph.
+
+    For paragraphs that had mixed inline formatting (multi_run), the text was
+    sent with ⟦n⟧ markers. We split the translation back on those markers and
+    drop each piece into the matching run group, preserving bold/italic/color
+    in the middle of the paragraph. If the markers were not preserved by the
+    engine (wrong count), we fall back to the single-run strategy.
+    """
+    if multi_run:
+        groups = _paragraph_format_groups(para)
+        if len(groups) > 1:
+            parts = INLINE_MARKER_RE.split(new_text)
+            # Text before the first marker (usually empty) is not a group
+            if parts and parts[0].strip() == "":
+                parts = parts[1:]
+            if len(parts) == len(groups):
+                for g, part in zip(groups, parts):
+                    idxs = g["run_indices"]
+                    para.runs[idxs[0]].text = part
+                    for ri in idxs[1:]:
+                        para.runs[ri].text = ""
+                return
+            # Fall through to single-run strategy on mismatch
+
+    # Single-run strategy: strip any stray markers, put all text in the first
+    # run, clear the rest. Preserves the paragraph style + first run's format.
+    clean = INLINE_MARKER_RE.sub("", new_text)
+    groups = _paragraph_format_groups(para)
+    if groups:
+        first_idx = groups[0]["run_indices"][0]
+        para.runs[first_idx].text = clean
+        for g in groups:
+            for ri in g["run_indices"]:
+                if ri != first_idx:
+                    para.runs[ri].text = ""
+    elif para.runs:
+        para.runs[0].text = clean
+        for run in para.runs[1:]:
+            run.text = ""
+    else:
+        para.text = clean
+
+
 def _replace_paragraph_text(para, new_text: str):
     """
     Replace text in a paragraph while preserving the formatting of the first run.
-    Strategy: put all new text in the first run, clear subsequent runs.
-    This preserves the paragraph style, first run's font/bold/italic/color.
+    Used for table cells (single-run strategy).
     """
     runs = para.runs
     if not runs:
@@ -683,12 +818,14 @@ LIBRETRANSLATE_LANG_MAP = {
 # LibreTranslate Translation with Retry
 # ============================================================
 
-async def translate_chunk_libretranslate(session, text, src, tgt, lt_url):
+async def translate_chunk_libretranslate(session, text, src, tgt, lt_url, job_id=None):
     """Translate text using LibreTranslate API."""
     src_lt = LIBRETRANSLATE_LANG_MAP.get(src, src)
     tgt_lt = LIBRETRANSLATE_LANG_MAP.get(tgt, tgt)
     payload = {"q": text, "source": src_lt, "target": tgt_lt, "format": "text"}
+    prompt_repr = f"POST {lt_url}/translate\n{json.dumps(payload, ensure_ascii=False)}"
     last_err = None
+    start = time.time()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with session.post(f"{lt_url}/translate", json=payload,
@@ -700,20 +837,31 @@ async def translate_chunk_libretranslate(session, text, src, tgt, lt_url):
                 result = data.get("translatedText", "").strip()
                 if not result:
                     raise Exception("Empty response from LibreTranslate")
+                record_exchange(job_id, "libretranslate", None, src, tgt,
+                                "libretranslate", prompt_repr, result, attempt,
+                                time.time() - start)
                 return result, attempt
         except Exception as e:
             last_err = e
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY * attempt)
+    record_exchange(job_id, "libretranslate", None, src, tgt, "libretranslate",
+                    prompt_repr, "", MAX_RETRIES, time.time() - start, error=str(last_err))
     raise Exception(f"LibreTranslate failed after {MAX_RETRIES} attempts: {last_err}")
 
 # ============================================================
 # Ollama Translation with Retry
 # ============================================================
 
+MARKER_INSTRUCTION = (
+    "If the text contains inline position markers like ⟦0⟧, ⟦1⟧, keep every "
+    "marker exactly as-is, immediately before the same word/segment it precedes. "
+    "Do not add, remove, renumber, reorder, or translate the markers.\n"
+)
+
 async def translate_chunk(session, text, src, tgt, model, url,
                           num_ctx=DEFAULT_NUM_CTX, context="",
-                          keep_alive=DEFAULT_KEEP_ALIVE):
+                          keep_alive=DEFAULT_KEEP_ALIVE, job_id=None):
     src_name = LANG_EN.get(src, src)
     tgt_name = LANG_EN.get(tgt, tgt)
     ctx = ""
@@ -721,13 +869,15 @@ async def translate_chunk(session, text, src, tgt, model, url,
         ctx = f"\n\nFor context, the previous translated passage was:\n{context[-400:]}\n"
     prompt = (
         f"You are a professional {src_name} to {tgt_name} translator. "
-        f"Produce only the {tgt_name} translation, no explanations or commentary."
+        f"Produce only the {tgt_name} translation, no explanations or commentary.\n"
+        f"{MARKER_INSTRUCTION}"
         f"{ctx}\n"
         f"Translate the following {src_name} text into {tgt_name}:\n\n{text}"
     )
     payload = {"model": model, "prompt": prompt, "stream": False,
                "options": {"num_ctx": num_ctx}, "keep_alive": keep_alive}
     last_err = None
+    start = time.time()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with session.post(f"{url}/api/generate", json=payload,
@@ -739,18 +889,23 @@ async def translate_chunk(session, text, src, tgt, model, url,
                 result = data.get("response", "").strip()
                 if not result:
                     raise Exception("Empty response from model")
+                record_exchange(job_id, "ollama", model, src, tgt, "single",
+                                prompt, result, attempt, time.time() - start)
                 return result, attempt
         except Exception as e:
             last_err = e
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY * attempt)
+    record_exchange(job_id, "ollama", model, src, tgt, "single",
+                    prompt, "", MAX_RETRIES, time.time() - start, error=str(last_err))
     raise Exception(f"Failed after {MAX_RETRIES} attempts: {last_err}")
 
 
 BATCH_SEPARATOR = "\n---SEGMENT_BREAK---\n"
 
 async def translate_batch_ollama(session, texts, src, tgt, model, url,
-                                 num_ctx=DEFAULT_NUM_CTX, keep_alive=DEFAULT_KEEP_ALIVE):
+                                 num_ctx=DEFAULT_NUM_CTX, keep_alive=DEFAULT_KEEP_ALIVE,
+                                 job_id=None):
     """Translate multiple text segments in a single Ollama request using separators."""
     src_name = LANG_EN.get(src, src)
     tgt_name = LANG_EN.get(tgt, tgt)
@@ -760,12 +915,14 @@ async def translate_batch_ollama(session, texts, src, tgt, model, url,
         f"Produce only the {tgt_name} translation, no explanations or commentary.\n"
         f"The text below contains {len(texts)} segments separated by '---SEGMENT_BREAK---'.\n"
         f"Translate each segment and keep the same '---SEGMENT_BREAK---' separators in your output.\n"
-        f"Do NOT add numbering, labels, or any extra text.\n\n"
+        f"Do NOT add numbering, labels, or any extra text.\n"
+        f"{MARKER_INSTRUCTION}\n"
         f"Translate the following {src_name} text into {tgt_name}:\n\n{combined}"
     )
     payload = {"model": model, "prompt": prompt, "stream": False,
                "options": {"num_ctx": num_ctx}, "keep_alive": keep_alive}
     last_err = None
+    start = time.time()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with session.post(f"{url}/api/generate", json=payload,
@@ -777,6 +934,8 @@ async def translate_batch_ollama(session, texts, src, tgt, model, url,
                 result = data.get("response", "").strip()
                 if not result:
                     raise Exception("Empty response from model")
+                record_exchange(job_id, "ollama", model, src, tgt, "batch",
+                                prompt, result, attempt, time.time() - start)
                 # Split result back into segments
                 parts = re.split(r'\s*---SEGMENT_BREAK---\s*', result)
                 # If model returned wrong number of parts, fall back
@@ -792,6 +951,8 @@ async def translate_batch_ollama(session, texts, src, tgt, model, url,
             last_err = e
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY * attempt)
+    record_exchange(job_id, "ollama", model, src, tgt, "batch",
+                    prompt, "", MAX_RETRIES, time.time() - start, error=str(last_err))
     raise Exception(f"Batch failed after {MAX_RETRIES} attempts: {last_err}")
 
 # ============================================================
@@ -998,7 +1159,7 @@ async def run_pipeline(job: TranslationJob):
                             results, attempts = await translate_batch_ollama(
                                 session, texts, job.source_lang, job.target_lang,
                                 job.model, job.ollama_url, num_ctx=job.num_ctx,
-                                keep_alive=job.keep_alive
+                                keep_alive=job.keep_alive, job_id=job.job_id
                             )
                             async with lock:
                                 for k, (idx, chunk) in enumerate(zip(indices, batch_chunks)):
@@ -1027,7 +1188,7 @@ async def run_pipeline(job: TranslationJob):
                                     translated, att = await translate_chunk(
                                         session, chunk["text"], job.source_lang, job.target_lang,
                                         job.model, job.ollama_url, num_ctx=job.num_ctx,
-                                        keep_alive=job.keep_alive
+                                        keep_alive=job.keep_alive, job_id=job.job_id
                                     )
                                     job.translated_chunks[idx] = translated
                                     async with lock:
@@ -1067,13 +1228,13 @@ async def run_pipeline(job: TranslationJob):
                             if use_libretranslate:
                                 translated, attempts = await translate_chunk_libretranslate(
                                     session, chunk["text"], job.source_lang, job.target_lang,
-                                    job.libretranslate_url
+                                    job.libretranslate_url, job_id=job.job_id
                                 )
                             else:
                                 translated, attempts = await translate_chunk(
                                     session, chunk["text"], job.source_lang, job.target_lang,
                                     job.model, job.ollama_url, num_ctx=job.num_ctx,
-                                    keep_alive=job.keep_alive
+                                    keep_alive=job.keep_alive, job_id=job.job_id
                                 )
                             job.translated_chunks[i] = translated
                             async with lock:
@@ -1313,13 +1474,14 @@ async def api_translate_text(req: TextTranslateRequest):
             if engine == 'libretranslate':
                 # For LibreTranslate, translate directly (handles chunking internally for short text)
                 translated, attempts = await translate_chunk_libretranslate(
-                    session, text, req.source_lang, req.target_lang, req.libretranslate_url
+                    session, text, req.source_lang, req.target_lang, req.libretranslate_url,
+                    job_id="text"
                 )
             else:
                 # For Ollama, translate directly
                 translated, attempts = await translate_chunk(
                     session, text, req.source_lang, req.target_lang,
-                    req.model, ollama_url, num_ctx=num_ctx
+                    req.model, ollama_url, num_ctx=num_ctx, job_id="text"
                 )
 
         app_logger.info(f"Text translate complete: {len(translated)} chars, {attempts} attempt(s)")
@@ -1390,6 +1552,25 @@ async def api_logs(limit: int = 500, level: str = ""):
     if level:
         logs = [l for l in logs if l["level"] == level.upper()]
     return {"logs": logs[-limit:], "total": len(log_handler.logs)}
+
+@app.get("/api/prompts")
+async def api_prompts(limit: int = 200, job_id: str = "", engine: str = ""):
+    """Return the prompt/response history (what was sent to / received from the
+    translation engine). Optionally filter by job_id or engine."""
+    items = list(prompt_log)
+    if job_id:
+        items = [p for p in items if p["job_id"] == job_id]
+    if engine:
+        items = [p for p in items if p["engine"] == engine]
+    return {"prompts": items[-limit:][::-1], "total": len(prompt_log)}
+
+@app.delete("/api/prompts")
+async def api_clear_prompts():
+    """Clear the prompt/response history."""
+    n = len(prompt_log)
+    prompt_log.clear()
+    app_logger.info(f"Prompt history cleared ({n} entries)")
+    return {"ok": True, "cleared": n}
 
 @app.get("/api/files")
 async def api_files():
