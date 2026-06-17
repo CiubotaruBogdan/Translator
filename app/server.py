@@ -1411,10 +1411,18 @@ def _parse_review_json(raw: str) -> dict:
 
 async def review_segment(session, src_text, tgt_text, src, tgt, model, url,
                          num_ctx=DEFAULT_NUM_CTX, keep_alive=DEFAULT_KEEP_ALIVE,
-                         job_id=None):
+                         job_id=None, preserve_markers=False):
     """Ask a general LLM to review one source/translation pair. Returns a dict."""
     src_name = LANG_EN.get(src, src)
     tgt_name = LANG_EN.get(tgt, tgt)
+    marker_note = ""
+    if preserve_markers:
+        marker_note = (
+            "The TRANSLATION contains inline position markers like ⟦0⟧, ⟦1⟧ that mark "
+            "text-formatting boundaries (bold/italic/etc.). If you provide a suggestion, "
+            "you MUST keep all of these markers in it, repositioned so each marked span "
+            "still matches the corresponding words. Do not add, remove, or renumber markers.\n"
+        )
     prompt = (
         f"You are a senior bilingual translation reviewer ({src_name} into {tgt_name}). "
         f"Compare the SOURCE with its TRANSLATION and judge the translation's quality: "
@@ -1426,7 +1434,8 @@ async def review_segment(session, src_text, tgt_text, src, tgt, model, url,
         f'"suggestion": "<an improved {tgt_name} translation, or empty string if none needed>"}}\n'
         f'Use "ok" when the translation is faithful and natural, "minor" for small '
         f'style/grammar issues, "major" for meaning errors or omissions. '
-        f'Leave "suggestion" empty when verdict is "ok".\n\n'
+        f'Leave "suggestion" empty when verdict is "ok".\n'
+        f"{marker_note}\n"
         f"SOURCE ({src_name}):\n{src_text}\n\n"
         f"TRANSLATION ({tgt_name}):\n{tgt_text}"
     )
@@ -1472,17 +1481,23 @@ async def run_review(job: TranslationJob, model: str, url: str,
         job.review_done = 0
         job.review_progress = 0.0
 
-        # Build aligned (index, source, translation) pairs, skipping empties/errors
+        # Build aligned (index, source, translation) pairs, skipping empties/errors.
+        # For segments with inline formatting markers (⟦n⟧), the reviewer is shown
+        # the marked translation and asked to keep the markers, so an applied
+        # suggestion can preserve bold/italic exactly like the original translation.
         sources = job.source_segments or []
         pairs = []
         for i, trans in enumerate(job.translated_chunks):
-            clean_trans = INLINE_MARKER_RE.sub("", trans or "").strip()
+            raw_trans = trans or ""
+            clean_trans = INLINE_MARKER_RE.sub("", raw_trans).strip()
             src_text = INLINE_MARKER_RE.sub("", sources[i]).strip() if i < len(sources) else ""
             if not clean_trans or clean_trans.startswith("[TRANSLATION ERROR"):
                 continue
             if not src_text:
                 continue
-            pairs.append((i, src_text, clean_trans))
+            has_markers = bool(INLINE_MARKER_RE.search(raw_trans))
+            tgt_for_review = raw_trans.strip() if has_markers else clean_trans
+            pairs.append((i, src_text, clean_trans, tgt_for_review, has_markers))
 
         job.review_total = len(pairs)
         if not pairs:
@@ -1513,7 +1528,7 @@ async def run_review(job: TranslationJob, model: str, url: str,
                 emit(job)
                 return
 
-            async def review_one(i, src_text, tgt_text):
+            async def review_one(i, src_text, disp_trans, tgt_for_review, has_markers):
                 if job.review_cancel:
                     return
                 async with semaphore:
@@ -1521,27 +1536,31 @@ async def run_review(job: TranslationJob, model: str, url: str,
                         return
                     try:
                         parsed = await review_segment(
-                            session, src_text, tgt_text, job.source_lang,
+                            session, src_text, tgt_for_review, job.source_lang,
                             job.target_lang, model, url, num_ctx=num_ctx,
-                            keep_alive=keep_alive, job_id=job.job_id)
+                            keep_alive=keep_alive, job_id=job.job_id,
+                            preserve_markers=has_markers)
                     except Exception as e:
                         parsed = {"verdict": "error", "score": None, "issues": [str(e)],
                                   "suggestion": ""}
+                    raw_sugg = (parsed.get("suggestion") or "").strip()
                     async with lock:
                         results[i] = {
                             "index": i,
                             "source": src_text,
-                            "translation": tgt_text,
+                            "translation": disp_trans,
                             "verdict": parsed.get("verdict", "unknown"),
                             "score": parsed.get("score"),
                             "issues": parsed.get("issues", []),
-                            "suggestion": parsed.get("suggestion", ""),
+                            # display version (markers stripped) + raw version (markers kept)
+                            "suggestion": INLINE_MARKER_RE.sub("", raw_sugg).strip(),
+                            "suggestion_raw": raw_sugg,
                         }
                         job.review_done += 1
                         job.review_progress = 100.0 * job.review_done / job.review_total
                         emit(job)
 
-            await asyncio.gather(*[review_one(i, s, t) for i, s, t in pairs])
+            await asyncio.gather(*[review_one(*p) for p in pairs])
 
         if job.review_cancel:
             job.review_status = "cancelled"
@@ -1848,9 +1867,10 @@ async def api_review_apply(job_id: str, req: ReviewApplyRequest):
     job = jobs[job_id]
     if not job.review_results:
         raise HTTPException(400, "Rulează mai întâi verificarea.")
-    # Map segment index -> suggestion (only those that actually have one)
-    suggestions = {r["index"]: r["suggestion"] for r in job.review_results
-                   if (r.get("suggestion") or "").strip()}
+    # Map segment index -> suggestion (only those that actually have one).
+    # Prefer the marker-carrying version so inline formatting is reapplied.
+    suggestions = {r["index"]: (r.get("suggestion_raw") or r.get("suggestion") or "")
+                   for r in job.review_results if (r.get("suggestion") or "").strip()}
     if req.apply_all:
         chosen = set(suggestions.keys())
     else:
