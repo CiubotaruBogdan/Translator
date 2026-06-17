@@ -820,6 +820,20 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         </div>
       </div>
 
+      <!-- Original TranslateGemma prompt -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Prompt model (Ollama / TranslateGemma)</span></div>
+        <div class="card-body">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+            <label style="font-size:13px;font-weight:500;cursor:pointer;display:flex;align-items:center;gap:8px">
+              <input type="checkbox" id="originalPrompt">
+              Păstrează promptul original TranslateGemma
+            </label>
+          </div>
+          <div class="form-hint">Trimite modelului exact promptul nativ recomandat (fără instrucțiunile de păstrare a formatării inline). Se aplică la traducerile cu Ollama (documente și text). ATENȚIE: în acest mod formatarea inline (bold/italic în mijlocul paragrafului) NU mai este păstrată, iar segmentele se traduc individual (mai lent).</div>
+        </div>
+      </div>
+
       <!-- Notifications -->
       <div class="card">
         <div class="card-header"><span class="card-title">Notificări</span></div>
@@ -981,6 +995,7 @@ function init() {
   if (localStorage.getItem('keepAlive')) $('keepAlive').value = localStorage.getItem('keepAlive');
   if (localStorage.getItem('notifEnabled') === 'false') $('notifEnabled').checked = false;
   if (localStorage.getItem('convertToPdf') === 'true') $('convertToPdf').checked = true;
+  if (localStorage.getItem('originalPrompt') === 'true' && $('originalPrompt')) $('originalPrompt').checked = true;
   if (localStorage.getItem('reviewConcurrency') && $('reviewConcurrency')) $('reviewConcurrency').value = localStorage.getItem('reviewConcurrency');
   if (localStorage.getItem('engine')) {
     $('engineSelect').value = localStorage.getItem('engine');
@@ -1196,6 +1211,7 @@ async function startTranslation() {
     formData.append('engine', engine);
     formData.append('libretranslate_url', libreUrl);
     formData.append('convert_to_pdf', $('convertToPdf').checked ? 'true' : 'false');
+    formData.append('original_prompt', ($('originalPrompt') && $('originalPrompt').checked) ? 'true' : 'false');
     formData.append('batch_size', parseInt($('batchSize').value) || 3);
     formData.append('keep_alive', $('keepAlive').value || '30m');
     formData.append('chunk_size', parseInt($('chunkSize').value) || 3000);
@@ -2070,6 +2086,7 @@ function saveSettings() {
   localStorage.setItem('keepAlive', $('keepAlive').value);
   localStorage.setItem('notifEnabled', $('notifEnabled').checked);
   localStorage.setItem('convertToPdf', $('convertToPdf').checked);
+  if ($('originalPrompt')) localStorage.setItem('originalPrompt', $('originalPrompt').checked);
   if ($('reviewModelSelect')) localStorage.setItem('reviewModel', $('reviewModelSelect').value);
   if ($('reviewConcurrency')) localStorage.setItem('reviewConcurrency', $('reviewConcurrency').value);
 }
@@ -2158,7 +2175,8 @@ async function translateText() {
         model: model,
         ollama_url: ollamaUrl,
         libretranslate_url: libreUrl,
-        num_ctx: numCtx
+        num_ctx: numCtx,
+        original_prompt: !!($('originalPrompt') && $('originalPrompt').checked)
       })
     });
 

@@ -187,7 +187,8 @@ class TranslationJob:
                  client_ip, concurrency=DEFAULT_CONCURRENCY, num_ctx=DEFAULT_NUM_CTX,
                  engine="ollama", libretranslate_url=DEFAULT_LIBRETRANSLATE_URL,
                  convert_to_pdf=False, batch_size=DEFAULT_BATCH_SIZE,
-                 keep_alive=DEFAULT_KEEP_ALIVE, chunk_size=MAX_CHUNK_CHARS):
+                 keep_alive=DEFAULT_KEEP_ALIVE, chunk_size=MAX_CHUNK_CHARS,
+                 original_prompt=False):
         self.job_id = job_id
         self.filename = filename
         self.source_lang = source_lang
@@ -203,6 +204,7 @@ class TranslationJob:
         self.batch_size = batch_size
         self.keep_alive = keep_alive
         self.chunk_size = chunk_size
+        self.original_prompt = original_prompt  # use native TranslateGemma prompt
         self.status = JobStatus.QUEUED
         self.progress = 0.0
         self.current_step = "Queued"
@@ -281,6 +283,7 @@ class TranslationJob:
             "batch_size": self.batch_size,
             "keep_alive": self.keep_alive,
             "chunk_size": self.chunk_size,
+            "original_prompt": self.original_prompt,
             "review": {
                 "status": self.review_status,
                 "model": self.review_model,
@@ -548,11 +551,14 @@ def _paragraph_format_groups(para) -> list[dict]:
     return groups
 
 
-def extract_docx_segments(filepath: Path) -> list[dict]:
+def extract_docx_segments(filepath: Path, tag_inline: bool = True) -> list[dict]:
     """
     Extract translatable segments from DOCX while preserving structure info.
     Each segment = one paragraph or one table cell, with metadata about location.
     Returns list of dicts: {type, index, text, char_count, ...}
+
+    When tag_inline is False, paragraphs are never tagged with ⟦n⟧ markers
+    (used when the "original prompt" mode is on — inline formatting is dropped).
     """
     doc = docx.Document(str(filepath))
     segments = []
@@ -563,7 +569,7 @@ def extract_docx_segments(filepath: Path) -> list[dict]:
         full_text = para.text.strip()
         if full_text:
             groups = _paragraph_format_groups(para)
-            if len(groups) > 1:
+            if tag_inline and len(groups) > 1:
                 # Mixed formatting -> tag each group so we can restore it later
                 seg_text = "".join(f"⟦{i}⟧{g['text']}" for i, g in enumerate(groups))
                 multi_run = True
@@ -883,19 +889,34 @@ MARKER_INSTRUCTION = (
 
 async def translate_chunk(session, text, src, tgt, model, url,
                           num_ctx=DEFAULT_NUM_CTX, context="",
-                          keep_alive=DEFAULT_KEEP_ALIVE, job_id=None):
+                          keep_alive=DEFAULT_KEEP_ALIVE, job_id=None,
+                          original_prompt=False):
     src_name = LANG_EN.get(src, src)
     tgt_name = LANG_EN.get(tgt, tgt)
-    ctx = ""
-    if context:
-        ctx = f"\n\nFor context, the previous translated passage was:\n{context[-400:]}\n"
-    prompt = (
-        f"You are a professional {src_name} to {tgt_name} translator. "
-        f"Produce only the {tgt_name} translation, no explanations or commentary.\n"
-        f"{MARKER_INSTRUCTION}"
-        f"{ctx}\n"
-        f"Translate the following {src_name} text into {tgt_name}:\n\n{text}"
-    )
+    if original_prompt:
+        # Native TranslateGemma prompt (see ollama.com/library/translategemma):
+        # includes the language codes, the "Your goal..." sentence and the two
+        # blank lines before the text. No inline-marker instruction, so inline
+        # formatting is NOT preserved in this mode (text is sent untagged).
+        prompt = (
+            f"You are a professional {src_name} ({src}) to {tgt_name} ({tgt}) translator. "
+            f"Your goal is to accurately convey the meaning and nuances of the original "
+            f"{src_name} text while adhering to {tgt_name} grammar, vocabulary, and cultural "
+            f"sensitivities.\n"
+            f"Produce only the {tgt_name} translation, without any additional explanations "
+            f"or commentary. Please translate the following {src_name} text into {tgt_name}:\n\n\n{text}"
+        )
+    else:
+        ctx = ""
+        if context:
+            ctx = f"\n\nFor context, the previous translated passage was:\n{context[-400:]}\n"
+        prompt = (
+            f"You are a professional {src_name} to {tgt_name} translator. "
+            f"Produce only the {tgt_name} translation, no explanations or commentary.\n"
+            f"{MARKER_INSTRUCTION}"
+            f"{ctx}\n"
+            f"Translate the following {src_name} text into {tgt_name}:\n\n{text}"
+        )
     payload = {"model": model, "prompt": prompt, "stream": False,
                "options": {"num_ctx": num_ctx}, "keep_alive": keep_alive}
     last_err = None
@@ -1059,7 +1080,7 @@ async def run_pipeline(job: TranslationJob):
         if use_docx_pipeline:
             # Format-preserving DOCX pipeline (for DOCX and converted PDF)
             try:
-                segments = extract_docx_segments(filepath)
+                segments = extract_docx_segments(filepath, tag_inline=not job.original_prompt)
             except Exception as e:
                 raise Exception(f"DOCX extraction failed: {e}")
             if not segments:
@@ -1153,7 +1174,9 @@ async def run_pipeline(job: TranslationJob):
             total_segs = len(chunks_to_translate)
 
             # Decide whether to use batching (Ollama only, batch_size > 1)
-            use_batching = (not use_libretranslate) and job.batch_size > 1
+            # Batching adds segment-separator instructions to the prompt, which would
+            # break the native "original prompt" — so it's disabled in that mode.
+            use_batching = (not use_libretranslate) and job.batch_size > 1 and not job.original_prompt
 
             if use_batching:
                 # --- BATCH MODE (Ollama) ---
@@ -1213,7 +1236,8 @@ async def run_pipeline(job: TranslationJob):
                                     translated, att = await translate_chunk(
                                         session, chunk["text"], job.source_lang, job.target_lang,
                                         job.model, job.ollama_url, num_ctx=job.num_ctx,
-                                        keep_alive=job.keep_alive, job_id=job.job_id
+                                        keep_alive=job.keep_alive, job_id=job.job_id,
+                                        original_prompt=job.original_prompt
                                     )
                                     job.translated_chunks[idx] = translated
                                     async with lock:
@@ -1259,7 +1283,8 @@ async def run_pipeline(job: TranslationJob):
                                 translated, attempts = await translate_chunk(
                                     session, chunk["text"], job.source_lang, job.target_lang,
                                     job.model, job.ollama_url, num_ctx=job.num_ctx,
-                                    keep_alive=job.keep_alive, job_id=job.job_id
+                                    keep_alive=job.keep_alive, job_id=job.job_id,
+                                    original_prompt=job.original_prompt
                                 )
                             job.translated_chunks[i] = translated
                             async with lock:
@@ -1697,7 +1722,8 @@ async def api_translate(
     convert_to_pdf: str = Form("false"),
     batch_size: int = Form(DEFAULT_BATCH_SIZE),
     keep_alive: str = Form(DEFAULT_KEEP_ALIVE),
-    chunk_size: int = Form(MAX_CHUNK_CHARS)
+    chunk_size: int = Form(MAX_CHUNK_CHARS),
+    original_prompt: str = Form("false")
 ):
     # Use server-detected URL if client sends empty
     if not ollama_url:
@@ -1716,11 +1742,13 @@ async def api_translate(
     client_ip = request.client.host if request.client else "unknown"
     engine = engine if engine in ('ollama', 'libretranslate') else 'ollama'
     pdf_convert = convert_to_pdf.lower() in ('true', '1', 'yes')
+    orig_prompt = original_prompt.lower() in ('true', '1', 'yes')
     job = TranslationJob(job_id, file.filename, source_lang, target_lang, model, ollama_url,
                          client_ip, concurrency=concurrency, num_ctx=num_ctx,
                          engine=engine, libretranslate_url=libretranslate_url,
                          convert_to_pdf=pdf_convert, batch_size=batch_size,
-                         keep_alive=keep_alive, chunk_size=chunk_size)
+                         keep_alive=keep_alive, chunk_size=chunk_size,
+                         original_prompt=orig_prompt)
     jobs[job_id] = job
     save_path = UPLOAD_DIR / f"{job_id}_{file.filename}"
     save_path.write_bytes(content)
@@ -1740,6 +1768,7 @@ class TextTranslateRequest(BaseModel):
     ollama_url: str = ""
     libretranslate_url: str = DEFAULT_LIBRETRANSLATE_URL
     num_ctx: int = DEFAULT_NUM_CTX
+    original_prompt: bool = False
 
 @app.post("/api/translate-text")
 async def api_translate_text(req: TextTranslateRequest):
@@ -1768,7 +1797,8 @@ async def api_translate_text(req: TextTranslateRequest):
                 # For Ollama, translate directly
                 translated, attempts = await translate_chunk(
                     session, text, req.source_lang, req.target_lang,
-                    req.model, ollama_url, num_ctx=num_ctx, job_id="text"
+                    req.model, ollama_url, num_ctx=num_ctx, job_id="text",
+                    original_prompt=req.original_prompt
                 )
 
         app_logger.info(f"Text translate complete: {len(translated)} chars, {attempts} attempt(s)")
