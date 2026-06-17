@@ -233,6 +233,7 @@ class TranslationJob:
         self.review_summary = None      # {ok, minor, major, errors, avg_score}
         self.review_error = None
         self.review_cancel = False
+        self.revised_output_file = None  # revised document after applying suggestions
 
     def add_event(self, etype, message, detail=""):
         self.events.append({
@@ -288,6 +289,7 @@ class TranslationJob:
                 "done": self.review_done,
                 "summary": self.review_summary,
                 "error": self.review_error,
+                "revised_output_file": self.revised_output_file,
             },
             "events": self.events[-100:]
         }
@@ -1569,6 +1571,48 @@ async def run_review(job: TranslationJob, model: str, url: str,
         job.add_event("error", "Verificare eșuată", str(e))
         emit(job)
 
+
+def build_revised_document(job: TranslationJob, revised_translations: list[str]):
+    """
+    Build a new document from the (possibly improved) translations.
+    For DOCX sources we reapply onto the original file to keep formatting;
+    otherwise we produce a clean text/DOCX with the revised content.
+    Returns (output_path, download_name).
+    """
+    ext = Path(job.filename).suffix.lower()
+    stem = Path(job.filename).stem
+    original_upload = UPLOAD_DIR / f"{job.job_id}_{job.filename}"
+
+    # Format-preserving path: original DOCX still available
+    if ext == '.docx' and job.docx_segments and original_upload.exists():
+        out_name = f"{stem}_{job.target_lang}_revizuit.docx"
+        out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
+        apply_translations_to_docx(original_upload, job.docx_segments,
+                                   revised_translations, out_path)
+        return out_path, out_name
+
+    # Plain text source
+    if ext in ('.txt', '.text', '.md'):
+        out_name = f"{stem}_{job.target_lang}_revizuit.txt"
+        out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
+        with open(out_path, 'w', encoding='utf-8') as f:
+            for t in revised_translations:
+                clean = INLINE_MARKER_RE.sub("", t or "")
+                if clean.strip():
+                    f.write(clean + "\n\n")
+        return out_path, out_name
+
+    # Fallback (e.g. PDF source whose converted DOCX is gone): plain DOCX, text only
+    out_name = f"{stem}_{job.target_lang}_revizuit.docx"
+    out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
+    d = docx.Document()
+    for t in revised_translations:
+        clean = INLINE_MARKER_RE.sub("", t or "")
+        if clean.strip():
+            d.add_paragraph(clean)
+    d.save(str(out_path))
+    return out_path, out_name
+
 # ============================================================
 # SSE
 # ============================================================
@@ -1777,6 +1821,7 @@ async def api_review_results(job_id: str):
         "done": job.review_done,
         "summary": job.review_summary,
         "error": job.review_error,
+        "revised_output_file": job.revised_output_file,
         "results": job.review_results,
     }
 
@@ -1787,6 +1832,60 @@ async def api_review_cancel(job_id: str):
         raise HTTPException(404, "Job not found")
     jobs[job_id].review_cancel = True
     return {"ok": True}
+
+
+class ReviewApplyRequest(BaseModel):
+    indices: list[int] = []     # segment indices whose suggestion to apply
+    apply_all: bool = False     # apply every suggestion that exists
+
+
+@app.post("/api/jobs/{job_id}/review/apply")
+async def api_review_apply(job_id: str, req: ReviewApplyRequest):
+    """Regenerate the document, replacing accepted segments with the reviewer's
+    improved translation."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    job = jobs[job_id]
+    if not job.review_results:
+        raise HTTPException(400, "Rulează mai întâi verificarea.")
+    # Map segment index -> suggestion (only those that actually have one)
+    suggestions = {r["index"]: r["suggestion"] for r in job.review_results
+                   if (r.get("suggestion") or "").strip()}
+    if req.apply_all:
+        chosen = set(suggestions.keys())
+    else:
+        chosen = {i for i in req.indices if i in suggestions}
+    if not chosen:
+        raise HTTPException(400, "Nicio propunere de aplicat.")
+
+    revised = list(job.translated_chunks)
+    for i in chosen:
+        if 0 <= i < len(revised):
+            revised[i] = suggestions[i]
+
+    try:
+        out_path, out_name = build_revised_document(job, revised)
+    except Exception as e:
+        raise HTTPException(500, f"Nu am putut genera documentul revizuit: {e}")
+
+    job.revised_output_file = out_name
+    job.add_event("success", "Document revizuit generat",
+                  f"{len(chosen)} propuneri aplicate -> {out_name}")
+    emit(job)
+    return {"ok": True, "filename": out_name, "applied": len(chosen)}
+
+
+@app.get("/api/jobs/{job_id}/review/download")
+async def api_review_download(job_id: str):
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    job = jobs[job_id]
+    if not job.revised_output_file:
+        raise HTTPException(404, "Niciun document revizuit. Aplică mai întâi propunerile.")
+    path = OUTPUT_DIR / f"{job_id}_rev_{job.revised_output_file}"
+    if not path.exists():
+        raise HTTPException(404, "Fișierul revizuit lipsește.")
+    return FileResponse(str(path), filename=job.revised_output_file)
 
 
 class ReviewTextRequest(BaseModel):
@@ -1836,7 +1935,8 @@ async def api_delete(job_id: str):
         raise HTTPException(404)
     job = jobs.pop(job_id)
     for p in [UPLOAD_DIR / f"{job_id}_{job.filename}",
-              OUTPUT_DIR / f"{job_id}_{job.output_file}" if job.output_file else None]:
+              OUTPUT_DIR / f"{job_id}_{job.output_file}" if job.output_file else None,
+              OUTPUT_DIR / f"{job_id}_rev_{job.revised_output_file}" if job.revised_output_file else None]:
         if p and p.exists():
             p.unlink()
     return {"ok": True}
