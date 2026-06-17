@@ -20,6 +20,13 @@ set "IMAGE_NAME=traducator-offline"
 set "TAR_NAME=traducator-offline.tar"
 set "DEFAULT_LANGS=en,ro"
 
+:: Master list of language codes supported by install_languages.py (lowercase, space-separated)
+set "VALID=sq ar az eu bn bg ca zt zh cs da nl en eo et fi fr gl de el he hi hu id ga it ja ko ky lv lt ms nb fa pl pt pb ro ru sk sl es sv tl th tr uk ur vi"
+
+:: Detect podman once (re-checked before each action too)
+set "PODMAN_OK=1"
+where podman >nul 2>&1 || set "PODMAN_OK=0"
+
 :MENU
 cls
 echo.
@@ -29,6 +36,11 @@ echo  ============================================================
 echo.
 echo   Director: %CD%
 echo   Imagine:  %IMAGE_NAME%
+if "!PODMAN_OK!"=="0" (
+    echo.
+    echo   [ATENTIE] podman nu a fost gasit in PATH.
+    echo       Instaleaza Podman Desktop si redeschide acest script.
+)
 echo.
 echo  ------------------------------------------------------------
 echo.
@@ -40,6 +52,7 @@ echo   0.  Iesire
 echo.
 echo  ============================================================
 echo.
+set "CHOICE="
 set /p "CHOICE=  Selecteaza optiunea [0-4]: "
 
 if "!CHOICE!"=="1" goto SELECT_LANGS
@@ -101,7 +114,7 @@ echo.
 echo   Alte limbi:
 echo     ar = Araba             fa = Persana         he = Ebraica
 echo     tr = Turca             az = Azera           ky = Kirgiza
-echo     eo = Esperanto
+echo     eo = Esperanto         pb = Portugheza (BR)
 echo.
 echo  ------------------------------------------------------------
 echo.
@@ -110,18 +123,39 @@ echo     en,ro             (doar engleza + romana, minim)
 echo     en,ro,fr          (+ franceza)
 echo     en,ro,fr,de,es,it (+ franceza, germana, spaniola, italiana)
 echo.
+set "USER_LANGS="
 set /p "USER_LANGS=  Introdu limbile [%DEFAULT_LANGS%]: "
 if "!USER_LANGS!"=="" set "USER_LANGS=%DEFAULT_LANGS%"
 
-:: Ensure en and ro are included
-echo !USER_LANGS! | findstr /i "en" >nul 2>&1
-if errorlevel 1 set "USER_LANGS=en,!USER_LANGS!"
-echo !USER_LANGS! | findstr /i "ro" >nul 2>&1
-if errorlevel 1 set "USER_LANGS=!USER_LANGS!,ro"
+:: -- Validate, normalize (lowercase canonical), de-duplicate --
+:: 'for' splits on commas and spaces, so comma- or space-separated input both work.
+set "CLEAN="
+set "BADCODES="
+for %%t in (!USER_LANGS!) do (
+    set "canon="
+    for %%v in (!VALID!) do if /i "%%v"=="%%t" set "canon=%%v"
+    if defined canon (
+        echo  !CLEAN!  | findstr /i /c:" !canon! " >nul
+        if errorlevel 1 set "CLEAN=!CLEAN! !canon!"
+    ) else (
+        set "BADCODES=!BADCODES! %%t"
+    )
+)
+
+:: Always put en + ro first, then the rest
+set "FINAL=en ro"
+for %%t in (!CLEAN!) do (
+    if /i not "%%t"=="en" if /i not "%%t"=="ro" set "FINAL=!FINAL! %%t"
+)
+:: Trim leading space and turn spaces into commas
+for /f "tokens=*" %%f in ("!FINAL!") do set "FINAL=%%f"
+set "USER_LANGS=!FINAL: =,!"
 
 echo.
+if defined BADCODES echo  ATENTIE: coduri necunoscute ignorate:!BADCODES!
 echo  Limbi selectate: !USER_LANGS!
 echo.
+set "CONFIRM_LANGS="
 set /p "CONFIRM_LANGS=  Continui cu aceste limbi? (D/N): "
 if /i not "!CONFIRM_LANGS!"=="D" goto LANG_MENU
 
@@ -138,6 +172,7 @@ echo  ============================================================
 echo   CONSTRUIRE IMAGINE
 echo  ============================================================
 echo.
+call :REQUIRE_BUILD_PREREQS || goto MENU
 echo  Limbi: !USER_LANGS!
 echo.
 echo  Se construieste imaginea %IMAGE_NAME%...
@@ -146,7 +181,7 @@ echo.
 
 podman build -t %IMAGE_NAME% --build-arg LANGUAGES=!USER_LANGS! -f Containerfile .
 
-if !ERRORLEVEL! NEQ 0 (
+if errorlevel 1 (
     echo.
     echo  EROARE: Construirea a esuat! Verifica mesajele de mai sus.
 ) else (
@@ -170,13 +205,10 @@ echo  ============================================================
 echo   EXPORT IMAGINE .TAR
 echo  ============================================================
 echo.
-echo  Se lanseaza exportul in fereastra noua...
-echo  (Aceasta fereastra revine la meniu)
+call :REQUIRE_PODMAN || goto MENU
+call :DO_EXPORT
 echo.
-
-start "Traducator - Export" cmd /c "chcp 65001 >nul 2>&1 && echo. && echo  ============================================================ && echo   EXPORT IMAGINE .TAR && echo  ============================================================ && echo. && echo  Se exporta %IMAGE_NAME% in %TAR_NAME% ... && echo  (Poate dura cateva minute) && echo. && podman save %IMAGE_NAME% -o "%CD%\%TAR_NAME%" && ( echo. && echo  SUCCES: Imaginea a fost exportata! && echo  Fisier: %CD%\%TAR_NAME% && echo. && echo  Copiaza pe stick USB: && echo    - %TAR_NAME% && echo    - traducator_manager.bat && echo    - TUTORIAL_DOCKER.md ) || ( echo. && echo  EROARE: Exportul a esuat! Asigura-te ca imaginea exista. ) && echo. && pause"
-
-timeout /t 2 >nul
+pause
 goto MENU
 
 :: ============================================================
@@ -189,6 +221,7 @@ echo  ============================================================
 echo   CONSTRUIRE + EXPORT
 echo  ============================================================
 echo.
+call :REQUIRE_BUILD_PREREQS || goto MENU
 echo  Limbi: !USER_LANGS!
 echo.
 echo  Pasul 1/2: Construire imagine...
@@ -196,23 +229,24 @@ echo.
 
 podman build -t %IMAGE_NAME% --build-arg LANGUAGES=!USER_LANGS! -f Containerfile .
 
-if !ERRORLEVEL! NEQ 0 (
+if errorlevel 1 (
     echo.
-    echo  EROARE: Construirea a esuat!
+    echo  EROARE: Construirea a esuat! Exportul a fost anulat.
     echo.
     pause
     goto MENU
 )
 
 echo.
-echo  Pasul 2/2: Export .tar - se lanseaza in fereastra noua...
+echo  Pasul 2/2: Export .tar...
 echo.
-
-start "Traducator - Export" cmd /c "chcp 65001 >nul 2>&1 && echo. && echo  ============================================================ && echo   PASUL 2/2: EXPORT .TAR && echo  ============================================================ && echo. && echo  Limbi incluse: !USER_LANGS! && echo. && echo  Se exporta %IMAGE_NAME% in %TAR_NAME% ... && echo  (Poate dura cateva minute) && echo. && podman save %IMAGE_NAME% -o "%CD%\%TAR_NAME%" && ( echo. && echo  ============================================================ && echo   TOTUL GATA! && echo  ============================================================ && echo. && echo  Fisier: %CD%\%TAR_NAME% && echo. && echo  Copiaza pe stick USB catre statia offline: && echo    - %TAR_NAME% && echo    - traducator_manager.bat && echo    - TUTORIAL_DOCKER.md ) || ( echo. && echo  EROARE: Exportul a esuat! ) && echo. && pause"
-
-echo.
-echo  Exportul ruleaza in fereastra separata.
-echo  Constructia s-a finalizat cu succes.
+call :DO_EXPORT
+if "!EXPORT_OK!"=="1" (
+    echo.
+    echo  ============================================================
+    echo   TOTUL GATA!
+    echo  ============================================================
+)
 echo.
 pause
 goto MENU
@@ -227,23 +261,98 @@ echo  ============================================================
 echo   VERIFICARE IMAGINE
 echo  ============================================================
 echo.
-podman images %IMAGE_NAME%
-echo.
-if exist "%TAR_NAME%" (
-    for %%A in ("%TAR_NAME%") do (
-        set /a SIZE_MB=%%~zA / 1048576
-        echo  Fisier .tar gasit: %TAR_NAME% (!SIZE_MB! MB^)
-    )
+call :REQUIRE_PODMAN || goto MENU
+
+podman image exists %IMAGE_NAME% 2>nul
+if errorlevel 1 (
+    echo  Imaginea %IMAGE_NAME% nu exista inca. Foloseste optiunea 1 sau 3.
 ) else (
-    echo  Fisierul .tar nu exista inca. Foloseste optiunea 2 sau 3.
+    podman images %IMAGE_NAME%
+    echo.
+    echo  Limbi instalate in imagine:
+    podman run --rm %IMAGE_NAME% printenv INSTALLED_LANGUAGES 2>nul
 )
 echo.
-echo  Verificare limbi instalate in imagine:
-podman run --rm %IMAGE_NAME% cat /app/installed_languages.txt 2>nul
-echo.
+call :SHOW_TAR_INFO
 echo.
 pause
 goto MENU
+
+:: ============================================================
+:: SUBROUTINES
+:: ============================================================
+
+:: Ensure podman is available; returns errorlevel 1 if not.
+:REQUIRE_PODMAN
+where podman >nul 2>&1
+if errorlevel 1 (
+    set "PODMAN_OK=0"
+    echo  EROARE: Podman nu este instalat sau nu este in PATH.
+    echo  Instaleaza Podman Desktop, apoi redeschide acest script.
+    echo.
+    pause
+    exit /b 1
+)
+set "PODMAN_OK=1"
+exit /b 0
+
+:: Ensure podman + the files needed for a build are present.
+:REQUIRE_BUILD_PREREQS
+call :REQUIRE_PODMAN || exit /b 1
+set "MISSING="
+if not exist "Containerfile"        set "MISSING=!MISSING! Containerfile"
+if not exist "install_languages.py" set "MISSING=!MISSING! install_languages.py"
+if not exist "app\"                 set "MISSING=!MISSING! app\"
+if defined MISSING (
+    echo  EROARE: lipsesc fisiere necesare pentru build:!MISSING!
+    echo  Ruleaza acest script din folderul proiectului.
+    echo.
+    pause
+    exit /b 1
+)
+exit /b 0
+
+:: Save the image to a .tar in the script directory. Sets EXPORT_OK=0/1.
+:DO_EXPORT
+set "EXPORT_OK=0"
+podman image exists %IMAGE_NAME% 2>nul
+if errorlevel 1 (
+    echo  EROARE: imaginea %IMAGE_NAME% nu exista. Construieste-o intai (optiunea 1 sau 3).
+    exit /b 1
+)
+echo  Se exporta %IMAGE_NAME% in %TAR_NAME% ...
+echo  (Poate dura cateva minute)
+echo.
+podman save %IMAGE_NAME% -o "%CD%\%TAR_NAME%"
+if errorlevel 1 (
+    echo  EROARE: Exportul a esuat!
+    exit /b 1
+)
+set "EXPORT_OK=1"
+echo.
+echo  SUCCES: Imaginea a fost exportata.
+call :SHOW_TAR_INFO
+echo.
+echo  Copiaza pe stick USB catre statia offline:
+echo    - %TAR_NAME%
+echo    - traducator_manager.bat
+echo    - TUTORIAL_DOCKER.md
+exit /b 0
+
+:: Print the .tar file size in a human-readable form (handles files over 2 GB).
+:SHOW_TAR_INFO
+if not exist "%TAR_NAME%" (
+    echo  Fisierul .tar nu exista inca.
+    exit /b 0
+)
+set "TAR_SIZE="
+for /f "usebackq delims=" %%S in (`powershell -NoProfile -Command "$b=(Get-Item '%CD%\%TAR_NAME%').Length; if($b -ge 1073741824){'{0:N2} GB' -f ($b/1GB)}else{'{0:N1} MB' -f ($b/1MB)}" 2^>nul`) do set "TAR_SIZE=%%S"
+if defined TAR_SIZE (
+    echo  Fisier .tar: %TAR_NAME%  ^(!TAR_SIZE!^)
+) else (
+    for %%A in ("%TAR_NAME%") do echo  Fisier .tar: %TAR_NAME%  ^(%%~zA bytes^)
+)
+exit /b 0
 
 :: ============================================================
 :: 0. EXIT
