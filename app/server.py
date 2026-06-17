@@ -1637,7 +1637,7 @@ def build_revised_document(job: TranslationJob, revised_translations: list[str])
 
     # Format-preserving path: original DOCX still available
     if ext == '.docx' and job.docx_segments and original_upload.exists():
-        out_name = f"{stem}_{job.target_lang}_revizuit.docx"
+        out_name = f"{stem}_{job.target_lang}_revizuit_review.docx"
         out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
         apply_translations_to_docx(original_upload, job.docx_segments,
                                    revised_translations, out_path)
@@ -1645,7 +1645,7 @@ def build_revised_document(job: TranslationJob, revised_translations: list[str])
 
     # Plain text source
     if ext in ('.txt', '.text', '.md'):
-        out_name = f"{stem}_{job.target_lang}_revizuit.txt"
+        out_name = f"{stem}_{job.target_lang}_revizuit_review.txt"
         out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
         with open(out_path, 'w', encoding='utf-8') as f:
             for t in revised_translations:
@@ -1655,7 +1655,7 @@ def build_revised_document(job: TranslationJob, revised_translations: list[str])
         return out_path, out_name
 
     # Fallback (e.g. PDF source whose converted DOCX is gone): plain DOCX, text only
-    out_name = f"{stem}_{job.target_lang}_revizuit.docx"
+    out_name = f"{stem}_{job.target_lang}_revizuit_review.docx"
     out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
     d = docx.Document()
     for t in revised_translations:
@@ -1894,6 +1894,7 @@ async def api_review_cancel(job_id: str):
 class ReviewApplyRequest(BaseModel):
     indices: list[int] = []     # segment indices whose suggestion to apply
     apply_all: bool = False     # apply every suggestion that exists
+    edits: dict[str, str] = {}  # segment index -> manually edited text (overrides suggestion)
 
 
 @app.post("/api/jobs/{job_id}/review/apply")
@@ -1909,17 +1910,21 @@ async def api_review_apply(job_id: str, req: ReviewApplyRequest):
     # Prefer the marker-carrying version so inline formatting is reapplied.
     suggestions = {r["index"]: (r.get("suggestion_raw") or r.get("suggestion") or "")
                    for r in job.review_results if (r.get("suggestion") or "").strip()}
+    # Manual edits override the suggestion for that segment. Note: manually
+    # edited text carries no inline ⟦n⟧ markers, so DOCX inline formatting on
+    # an edited segment is not reapplied.
+    edits = {int(k): v for k, v in (req.edits or {}).items()}
     if req.apply_all:
-        chosen = set(suggestions.keys())
+        chosen = set(suggestions.keys()) | set(edits.keys())
     else:
-        chosen = {i for i in req.indices if i in suggestions}
+        chosen = {i for i in req.indices if i in suggestions or i in edits}
     if not chosen:
         raise HTTPException(400, "Nicio propunere de aplicat.")
 
     revised = list(job.translated_chunks)
     for i in chosen:
         if 0 <= i < len(revised):
-            revised[i] = suggestions[i]
+            revised[i] = edits.get(i, suggestions.get(i, revised[i]))
 
     try:
         out_path, out_name = build_revised_document(job, revised)
