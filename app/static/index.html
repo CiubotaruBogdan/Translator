@@ -1805,7 +1805,7 @@ function startReviewPolling() {
       if (data.status !== 'running') { clearInterval(reviewState.poll); reviewState.poll = null; }
     } catch (e) {}
   };
-  reviewState.poll = setInterval(tick, 1500);
+  reviewState.poll = setInterval(tick, 1000);
   tick();
 }
 
@@ -1841,10 +1841,11 @@ function applyReviewData(data) {
     sumEl.innerHTML = '';
   }
 
-  // Default-select all suggestions once results are in
-  const withSugg = (data.results || []).filter(r => (r.suggestion||'').trim());
-  if (!reviewState.selInit && withSugg.length) {
-    reviewState.selected = new Set(withSugg.map(r => r.index));
+  // Default-select all suggestions once the review has FINISHED (partial
+  // results stream in live while running, so we wait for completion).
+  if (!reviewState.selInit && data.status && data.status !== 'running') {
+    const withSugg = (data.results || []).filter(r => (r.suggestion||'').trim());
+    if (withSugg.length) reviewState.selected = new Set(withSugg.map(r => r.index));
     reviewState.selInit = true;
   }
   // Show existing revised-document link if already generated

@@ -1493,6 +1493,18 @@ async def review_segment(session, src_text, tgt_text, src, tgt, model, url,
     raise Exception(f"Review failed after {MAX_RETRIES} attempts: {last_err}")
 
 
+def _review_summary(results_list, partial=False):
+    """Aggregate per-segment review verdicts into a summary dict."""
+    ok = sum(1 for r in results_list if r["verdict"] == "ok")
+    minor = sum(1 for r in results_list if r["verdict"] == "minor")
+    major = sum(1 for r in results_list if r["verdict"] == "major")
+    errors = sum(1 for r in results_list if r["verdict"] in ("error", "unknown"))
+    scores = [r["score"] for r in results_list if isinstance(r["score"], int)]
+    avg_score = round(sum(scores) / len(scores), 2) if scores else None
+    return {"ok": ok, "minor": minor, "major": major, "errors": errors,
+            "avg_score": avg_score, "total": len(results_list), "partial": partial}
+
+
 async def run_review(job: TranslationJob, model: str, url: str,
                      num_ctx: int = DEFAULT_NUM_CTX, concurrency: int = DEFAULT_CONCURRENCY,
                      keep_alive: str = DEFAULT_KEEP_ALIVE):
@@ -1583,6 +1595,9 @@ async def run_review(job: TranslationJob, model: str, url: str,
                         }
                         job.review_done += 1
                         job.review_progress = 100.0 * job.review_done / job.review_total
+                        # Expose partial results live so the UI populates in real time
+                        job.review_results = [results[k] for k in sorted(results.keys())]
+                        job.review_summary = _review_summary(job.review_results, partial=True)
                         emit(job)
 
             await asyncio.gather(*[review_one(*p) for p in pairs])
@@ -1594,20 +1609,13 @@ async def run_review(job: TranslationJob, model: str, url: str,
             return
 
         job.review_results = [results[k] for k in sorted(results.keys())]
-        ok = sum(1 for r in job.review_results if r["verdict"] == "ok")
-        minor = sum(1 for r in job.review_results if r["verdict"] == "minor")
-        major = sum(1 for r in job.review_results if r["verdict"] == "major")
-        errors = sum(1 for r in job.review_results if r["verdict"] in ("error", "unknown"))
-        scores = [r["score"] for r in job.review_results if isinstance(r["score"], int)]
-        avg_score = round(sum(scores) / len(scores), 2) if scores else None
-        job.review_summary = {"ok": ok, "minor": minor, "major": major,
-                              "errors": errors, "avg_score": avg_score,
-                              "total": len(job.review_results)}
+        job.review_summary = _review_summary(job.review_results)
+        sm = job.review_summary
         job.review_status = "completed"
         job.review_progress = 100.0
         job.add_event("success", "Verificare finalizată",
-                      f"{ok} ok · {minor} minore · {major} majore"
-                      + (f" · scor mediu {avg_score}/5" if avg_score else ""))
+                      f"{sm['ok']} ok · {sm['minor']} minore · {sm['major']} majore"
+                      + (f" · scor mediu {sm['avg_score']}/5" if sm['avg_score'] else ""))
         emit(job)
     except Exception as e:
         job.review_status = "failed"
