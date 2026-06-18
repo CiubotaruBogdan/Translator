@@ -304,6 +304,10 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         <svg viewBox="0 0 24 24"><path d="M9.5 6.5v3h-3v-3h3M11 5H5v6h6V5zm-1.5 9.5v3h-3v-3h3M11 13H5v6h6v-6zm6.5-6.5v3h-3v-3h3M19 5h-6v6h6V5zm-6 8h1.5v1.5H13V13zm1.5 1.5H16V16h-1.5v-1.5zM16 13h1.5v1.5H16V13zm-3 3h1.5v1.5H13V16zm1.5 1.5H16V19h-1.5v-1.5zM16 16h1.5v1.5H16V16zm1.5-1.5H19V16h-1.5v-1.5zm0 3H19V19h-1.5v-1.5zM22 7h-2V4h-3V2h5v5zm0 15v-5h-2v3h-3v2h5zM2 22h5v-2H4v-3H2v5zM2 2v5h2V4h3V2H2z"/></svg>
         OCR
       </div>
+      <div class="nav-item" data-page="verify" onclick="showPage('verify')">
+        <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+        Verifică traducere
+      </div>
       <div class="nav-item" data-page="jobs" onclick="showPage('jobs')">
         <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM7 10h2v7H7zm4-3h2v10h-2zm4 6h2v4h-2z"/></svg>
         Job-uri
@@ -619,6 +623,64 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         <div class="card-body">
           <pre id="ocrResultText" style="white-space:pre-wrap;word-wrap:break-word;font-family:inherit;font-size:14px;line-height:1.7;color:var(--text);max-height:500px;overflow-y:auto;margin:0"></pre>
         </div>
+      </div>
+    </div>
+
+    <!-- ==================== PAGE: VERIFY (review two documents) ==================== -->
+    <div class="page" id="page-verify">
+      <h2 class="page-title">Verifică traducere</h2>
+      <p style="color:var(--text2);font-size:13px;margin-top:-6px;margin-bottom:16px">
+        Încarcă documentul <strong>original</strong> și documentul <strong>tradus</strong>, apoi rulează verificarea de calitate cu un model LLM — segment cu segment. Segmentele se aliniază pe poziție.
+      </p>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Documente</span>
+          <span class="badge blue" style="font-size:11px">DOCX · PDF · TXT · MD</span>
+        </div>
+        <div class="card-body">
+          <div class="form-group" style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px">
+            <div>
+              <label class="form-label">Limba originalului</label>
+              <select class="form-control" id="verifySourceLang" style="max-width:200px"></select>
+            </div>
+            <div>
+              <label class="form-label">Limba traducerii</label>
+              <select class="form-control" id="verifyTargetLang" style="max-width:200px"></select>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div>
+              <div class="form-label" style="margin-bottom:6px">📄 Document original</div>
+              <div class="upload-zone" id="verifyOrigZone">
+                <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+                <p>Trageți originalul aici sau click</p>
+                <div class="hint">DOCX, PDF, TXT, MD</div>
+              </div>
+              <input type="file" id="verifyOrigInput" accept=".docx,.pdf,.txt,.text,.md" style="display:none">
+              <div id="verifyOrigSelected" style="margin-top:10px"></div>
+            </div>
+            <div>
+              <div class="form-label" style="margin-bottom:6px">🌍 Document tradus</div>
+              <div class="upload-zone" id="verifyTransZone">
+                <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+                <p>Trageți traducerea aici sau click</p>
+                <div class="hint">DOCX, PDF, TXT, MD</div>
+              </div>
+              <input type="file" id="verifyTransInput" accept=".docx,.pdf,.txt,.text,.md" style="display:none">
+              <div id="verifyTransSelected" style="margin-top:10px"></div>
+            </div>
+          </div>
+          <div class="form-hint" style="margin-top:10px">Pentru rezultate corecte, cele două documente trebuie să aibă aceeași structură (același număr de paragrafe). Modelul de verificare și contextul se configurează în <em>Setări → Model de verificare</em>.</div>
+        </div>
+      </div>
+
+      <div style="text-align:center;margin:16px 0">
+        <button class="btn btn-primary" id="verifyRunBtn" onclick="runVerify()">
+          <svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+          Verifică traducerea
+        </button>
       </div>
     </div>
 
@@ -1605,8 +1667,8 @@ function renderJobs(jobsList) {
 
     return `<div class="job-item">
       <div class="job-info">
-        <div class="job-name">${j.filename}</div>
-        <div class="job-meta">${j.source_lang} → ${j.target_lang} · ${engineLabel} · ${j.client_ip} · ${j.created_at.substring(11,19)}</div>
+        <div class="job-name">${j.filename}${j.kind === 'verify' ? ' <span class="badge purple" style="font-size:10px;vertical-align:middle">verificare</span>' : ''}</div>
+        <div class="job-meta">${j.source_lang} → ${j.target_lang} · ${j.kind === 'verify' ? 'doc extern' : engineLabel} · ${j.client_ip} · ${j.created_at.substring(11,19)}</div>
         ${currentStepLine}
       </div>
       <div class="job-stats-center">
@@ -2463,10 +2525,92 @@ function copyOCRText() {
 }
 
 // ============================================================
+// VERIFY TWO DOCUMENTS (review-only job)
+// ============================================================
+let verifyOrigFile = null, verifyTransFile = null;
+const VERIFY_EXTS = ['docx','pdf','txt','text','md'];
+
+function setupVerify() {
+  if (!$('verifyOrigZone')) return;
+  const wire = (zoneId, inputId, which) => {
+    const zone = $(zoneId), input = $(inputId);
+    zone.addEventListener('click', () => input.click());
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+    zone.addEventListener('drop', e => {
+      e.preventDefault(); zone.classList.remove('dragover');
+      if (e.dataTransfer.files.length) selectVerifyFile(which, e.dataTransfer.files[0]);
+    });
+    input.addEventListener('change', e => {
+      if (e.target.files.length) selectVerifyFile(which, e.target.files[0]);
+      input.value = '';
+    });
+  };
+  wire('verifyOrigZone', 'verifyOrigInput', 'orig');
+  wire('verifyTransZone', 'verifyTransInput', 'trans');
+
+  const src = $('verifySourceLang'), tgt = $('verifyTargetLang');
+  ALL_LANGS.forEach(l => { src.add(new Option(l.n, l.c)); tgt.add(new Option(l.n, l.c)); });
+  src.value = localStorage.getItem('sourceLang') || 'ro';
+  tgt.value = localStorage.getItem('targetLang') || 'en';
+}
+
+function selectVerifyFile(which, file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (!VERIFY_EXTS.includes(ext)) { toast('Format nesuportat: ' + file.name, 'error'); return; }
+  if (which === 'orig') verifyOrigFile = file; else verifyTransFile = file;
+  const target = which === 'orig' ? 'verifyOrigSelected' : 'verifyTransSelected';
+  $(target).innerHTML = `<div class="file-item">
+    <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+    <div class="file-item-info">
+      <div class="file-item-name">${file.name}</div>
+      <div class="file-item-size">${fmtBytes(file.size)}</div>
+    </div>
+    <button class="file-item-remove" onclick="clearVerifyFile('${which}')">✕</button>
+  </div>`;
+}
+
+function clearVerifyFile(which) {
+  if (which === 'orig') { verifyOrigFile = null; $('verifyOrigSelected').innerHTML = ''; }
+  else { verifyTransFile = null; $('verifyTransSelected').innerHTML = ''; }
+}
+
+async function runVerify() {
+  if (!verifyOrigFile || !verifyTransFile) {
+    toast('Încarcă ambele documente (original și tradus)', 'warning'); return;
+  }
+  const btn = $('verifyRunBtn');
+  btn.disabled = true;
+  const old = btn.innerHTML; btn.textContent = 'Se pregătește...';
+  try {
+    const fd = new FormData();
+    fd.append('original', verifyOrigFile);
+    fd.append('translated', verifyTransFile);
+    fd.append('source_lang', $('verifySourceLang').value);
+    fd.append('target_lang', $('verifyTargetLang').value);
+    const resp = await fetch('/api/verify-documents', { method: 'POST', body: fd });
+    if (!resp.ok) { const err = await resp.json().catch(()=>({})); throw new Error(err.detail || resp.status); }
+    const data = await resp.json();
+    if (data.mismatch) {
+      toast(`Numere diferite de segmente (${data.original_segments} vs ${data.translated_segments}). Se verifică primele ${data.total}.`, 'warning');
+    } else {
+      toast(`${data.total} segmente pregătite pentru verificare`, 'success');
+    }
+    loadJobs();
+    openReview(data.job_id);
+  } catch (e) {
+    toast('Eroare: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.innerHTML = old;
+  }
+}
+
+// ============================================================
 // START
 // ============================================================
 init();
 setupOCR();
+setupVerify();
 </script>
 </body>
 </html>
