@@ -208,6 +208,7 @@ class TranslationJob:
         self.status = JobStatus.QUEUED
         self.progress = 0.0
         self.current_step = "Queued"
+        self.kind = "translate"     # 'translate' | 'verify' (external-document review)
         self.total_chunks = 0
         self.completed_chunks = 0
         self.failed_chunks = 0
@@ -258,6 +259,7 @@ class TranslationJob:
         return {
             "job_id": self.job_id,
             "filename": self.filename,
+            "kind": self.kind,
             "source_lang": self.source_lang,
             "target_lang": self.target_lang,
             "model": self.model,
@@ -782,6 +784,24 @@ def extract_text_from_txt(filepath: Path) -> list[str]:
         if cleaned:
             paragraphs.append(cleaned)
     return paragraphs
+
+def extract_review_segments(filepath: Path):
+    """Segment an already-finished document for review.
+
+    Returns ``(segment_texts, docx_segments)`` where ``docx_segments`` is the
+    structural metadata (only for DOCX, used to rebuild a revised document) or
+    ``None`` for plain-text/PDF sources. DOCX paragraphs keep their inline
+    ⟦n⟧ markers so applied corrections can preserve bold/italic.
+    """
+    ext = filepath.suffix.lower()
+    if ext == '.docx':
+        segs = extract_docx_segments(filepath, tag_inline=True)
+        return [s['text'] for s in segs], segs
+    if ext == '.pdf':
+        return extract_text_from_pdf(filepath), None
+    if ext in ('.txt', '.text', '.md'):
+        return extract_text_from_txt(filepath), None
+    raise ValueError(f"Format nesuportat: {ext}")
 
 # ============================================================
 # Smart Chunking (for plain text pipeline)
@@ -1887,6 +1907,83 @@ async def api_cancel(job_id: str):
         raise HTTPException(404)
     jobs[job_id].cancelled = True
     return {"ok": True}
+
+
+@app.post("/api/verify-documents")
+async def api_verify_documents(
+    request: Request,
+    original: UploadFile = File(...),
+    translated: UploadFile = File(...),
+    source_lang: str = Form("ro"),
+    target_lang: str = Form("en"),
+):
+    """Create a review-only job from two uploaded documents (an original and its
+    translation). Segments are aligned by position; the existing review pipeline
+    then verifies each (original, translation) pair. No translation is performed.
+    """
+    allowed = ('.docx', '.pdf', '.txt', '.text', '.md')
+    for f in (original, translated):
+        ext = Path(f.filename).suffix.lower()
+        if ext not in allowed:
+            raise HTTPException(400, f"Format nesuportat: {ext}. Acceptate: {', '.join(allowed)}")
+
+    orig_bytes = await original.read()
+    trans_bytes = await translated.read()
+    for b in (orig_bytes, trans_bytes):
+        if len(b) > MAX_FILE_SIZE:
+            raise HTTPException(400, f"Fișier prea mare (max {MAX_FILE_SIZE // 1024 // 1024}MB)")
+
+    job_id = str(uuid.uuid4())[:8]
+    # The translated file is saved under the job-id prefix so a revised document
+    # can later be rebuilt on top of it (preserving DOCX formatting).
+    orig_path = UPLOAD_DIR / f"{job_id}_orig_{original.filename}"
+    trans_path = UPLOAD_DIR / f"{job_id}_{translated.filename}"
+    orig_path.write_bytes(orig_bytes)
+    trans_path.write_bytes(trans_bytes)
+
+    try:
+        src_texts, _ = extract_review_segments(orig_path)
+        tgt_texts, tgt_docx = extract_review_segments(trans_path)
+    except Exception as e:
+        raise HTTPException(400, f"Nu am putut citi documentele: {e}")
+
+    if not src_texts or not tgt_texts:
+        raise HTTPException(400, "Unul dintre documente nu conține text de verificat.")
+
+    orig_count, trans_count = len(src_texts), len(tgt_texts)
+    mismatch = orig_count != trans_count
+    n = min(orig_count, trans_count)
+    src_texts = src_texts[:n]
+    tgt_texts = tgt_texts[:n]
+    if tgt_docx is not None:
+        tgt_docx = tgt_docx[:n]
+
+    client_ip = request.client.host if request and request.client else "-"
+    job = TranslationJob(job_id, translated.filename, source_lang, target_lang,
+                         model="", ollama_url=DEFAULT_OLLAMA_URL, client_ip=client_ip)
+    job.kind = "verify"
+    job.status = JobStatus.COMPLETED
+    job.progress = 100.0
+    job.current_step = "Verificare pregătită"
+    job.started_at = job.created_at
+    job.completed_at = datetime.now().isoformat()
+    job.source_segments = src_texts
+    job.translated_chunks = tgt_texts
+    job.docx_segments = tgt_docx or []
+    job.total_chunks = n
+    job.completed_chunks = n
+    job.output_file = translated.filename
+    # Saving the translation to OUTPUT_DIR lets the job's normal download button
+    # return the document under review.
+    (OUTPUT_DIR / f"{job_id}_{translated.filename}").write_bytes(trans_bytes)
+    detail = f"original={original.filename}, tradus={translated.filename}, {n} segmente"
+    if mismatch:
+        detail += f" — numere diferite de segmente ({orig_count} vs {trans_count}), aliniat la {n}"
+    job.add_event("info", "Verificare document încărcată", detail)
+    jobs[job_id] = job
+    emit(job)
+    return {"job_id": job_id, "total": n, "original_segments": orig_count,
+            "translated_segments": trans_count, "mismatch": mismatch}
 
 
 class ReviewRequest(BaseModel):
