@@ -1436,7 +1436,8 @@ def _parse_review_json(raw: str) -> dict:
 
 async def review_segment(session, src_text, tgt_text, src, tgt, model, url,
                          num_ctx=DEFAULT_NUM_CTX, keep_alive=DEFAULT_KEEP_ALIVE,
-                         job_id=None, preserve_markers=False):
+                         job_id=None, preserve_markers=False,
+                         context_before="", context_after=""):
     """Ask a general LLM to review one source/translation pair. Returns a dict."""
     src_name = LANG_EN.get(src, src)
     tgt_name = LANG_EN.get(tgt, tgt)
@@ -1447,6 +1448,16 @@ async def review_segment(session, src_text, tgt_text, src, tgt, model, url,
             "text-formatting boundaries (bold/italic/etc.). If you provide a suggestion, "
             "you MUST keep all of these markers in it, repositioned so each marked span "
             "still matches the corresponding words. Do not add, remove, or renumber markers.\n"
+        )
+    context_note = ""
+    if context_before or context_after:
+        context_note = (
+            f"The following surrounding {src_name} text is given as CONTEXT ONLY, to help "
+            f"you resolve references, terminology and tone. Do NOT review or translate it; "
+            f"judge ONLY the SOURCE/TRANSLATION pair below.\n"
+            + (f"CONTEXT BEFORE:\n{context_before}\n" if context_before else "")
+            + (f"CONTEXT AFTER:\n{context_after}\n" if context_after else "")
+            + "\n"
         )
     prompt = (
         f"You are a senior bilingual translation reviewer ({src_name} into {tgt_name}). "
@@ -1460,7 +1471,8 @@ async def review_segment(session, src_text, tgt_text, src, tgt, model, url,
         f'Use "ok" when the translation is faithful and natural, "minor" for small '
         f'style/grammar issues, "major" for meaning errors or omissions. '
         f'Leave "suggestion" empty when verdict is "ok".\n'
-        f"{marker_note}\n"
+        f"{marker_note}"
+        f"{context_note}"
         f"SOURCE ({src_name}):\n{src_text}\n\n"
         f"TRANSLATION ({tgt_name}):\n{tgt_text}"
     )
@@ -1507,8 +1519,13 @@ def _review_summary(results_list, partial=False):
 
 async def run_review(job: TranslationJob, model: str, url: str,
                      num_ctx: int = DEFAULT_NUM_CTX, concurrency: int = DEFAULT_CONCURRENCY,
-                     keep_alive: str = DEFAULT_KEEP_ALIVE):
-    """Review every translated segment of a completed job with a general LLM."""
+                     keep_alive: str = DEFAULT_KEEP_ALIVE, context_window: int = 1):
+    """Review every translated segment of a completed job with a general LLM.
+
+    ``context_window`` is how many neighbouring source segments (each side) are
+    passed to the reviewer as read-only context so it can judge references,
+    terminology and tone in context. 0 disables surrounding context.
+    """
     try:
         job.review_status = "running"
         job.review_model = model
@@ -1523,18 +1540,36 @@ async def run_review(job: TranslationJob, model: str, url: str,
         # the marked translation and asked to keep the markers, so an applied
         # suggestion can preserve bold/italic exactly like the original translation.
         sources = job.source_segments or []
+        # Pre-clean every source segment once so we can cheaply assemble the
+        # surrounding context for any index.
+        clean_sources = [INLINE_MARKER_RE.sub("", s or "").strip() for s in sources]
+        CTX_CHAR_BUDGET = 600  # per side, to keep the prompt within num_ctx
+
+        def context_for(i):
+            if context_window <= 0:
+                return "", ""
+            before = " ".join(
+                clean_sources[j] for j in range(max(0, i - context_window), i)
+                if clean_sources[j])
+            after = " ".join(
+                clean_sources[j] for j in range(i + 1, min(len(clean_sources), i + 1 + context_window))
+                if clean_sources[j])
+            return before[-CTX_CHAR_BUDGET:], after[:CTX_CHAR_BUDGET]
+
         pairs = []
         for i, trans in enumerate(job.translated_chunks):
             raw_trans = trans or ""
             clean_trans = INLINE_MARKER_RE.sub("", raw_trans).strip()
-            src_text = INLINE_MARKER_RE.sub("", sources[i]).strip() if i < len(sources) else ""
+            src_text = clean_sources[i] if i < len(clean_sources) else ""
             if not clean_trans or clean_trans.startswith("[TRANSLATION ERROR"):
                 continue
             if not src_text:
                 continue
             has_markers = bool(INLINE_MARKER_RE.search(raw_trans))
             tgt_for_review = raw_trans.strip() if has_markers else clean_trans
-            pairs.append((i, src_text, clean_trans, tgt_for_review, has_markers))
+            ctx_before, ctx_after = context_for(i)
+            pairs.append((i, src_text, clean_trans, tgt_for_review, has_markers,
+                          ctx_before, ctx_after))
 
         job.review_total = len(pairs)
         if not pairs:
@@ -1565,7 +1600,8 @@ async def run_review(job: TranslationJob, model: str, url: str,
                 emit(job)
                 return
 
-            async def review_one(i, src_text, disp_trans, tgt_for_review, has_markers):
+            async def review_one(i, src_text, disp_trans, tgt_for_review, has_markers,
+                                 ctx_before, ctx_after):
                 if job.review_cancel:
                     return
                 async with semaphore:
@@ -1576,7 +1612,8 @@ async def run_review(job: TranslationJob, model: str, url: str,
                             session, src_text, tgt_for_review, job.source_lang,
                             job.target_lang, model, url, num_ctx=num_ctx,
                             keep_alive=keep_alive, job_id=job.job_id,
-                            preserve_markers=has_markers)
+                            preserve_markers=has_markers,
+                            context_before=ctx_before, context_after=ctx_after)
                     except Exception as e:
                         parsed = {"verdict": "error", "score": None, "issues": [str(e)],
                                   "suggestion": ""}
@@ -1840,6 +1877,7 @@ class ReviewRequest(BaseModel):
     num_ctx: int = DEFAULT_NUM_CTX
     concurrency: int = DEFAULT_CONCURRENCY
     keep_alive: str = DEFAULT_KEEP_ALIVE
+    context_window: int = 1  # neighbouring source segments (each side) as context
 
 
 @app.post("/api/jobs/{job_id}/review")
@@ -1858,8 +1896,10 @@ async def api_review(job_id: str, req: ReviewRequest):
     url = (req.ollama_url or "").strip() or job.ollama_url or DEFAULT_OLLAMA_URL
     num_ctx = max(512, min(req.num_ctx, 32768))
     concurrency = max(1, min(req.concurrency, 10))
+    context_window = max(0, min(req.context_window, 5))
     asyncio.create_task(run_review(job, model, url, num_ctx=num_ctx,
-                                   concurrency=concurrency, keep_alive=req.keep_alive))
+                                   concurrency=concurrency, keep_alive=req.keep_alive,
+                                   context_window=context_window))
     return {"ok": True, "model": model, "total": len(job.source_segments)}
 
 
