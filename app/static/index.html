@@ -709,6 +709,17 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
             <input class="form-control" id="reviewConcurrency" type="number" min="1" max="10" value="3" style="max-width:120px">
             <div class="form-hint">Câte segmente sunt verificate în paralel.</div>
           </div>
+          <div class="form-group">
+            <label class="form-label">Context la verificare (segmente vecine)</label>
+            <input class="form-control" id="reviewContextWindow" type="number" min="0" max="5" value="1" style="max-width:120px">
+            <div class="form-hint">Câte segmente din original, dinainte și de după, sunt date verificatorului ca context (doar pentru înțelegere, nu se evaluează). 0 = fără context.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="reviewContextTranslations" style="width:auto;margin:0"> Include și traducerile vecine în context
+            </label>
+            <div class="form-hint">Pe lângă originalul vecin, trimite și traducerea segmentelor vecine — ajută la consistența terminologică și fluența între segmente.</div>
+          </div>
         </div>
       </div>
 
@@ -997,6 +1008,8 @@ function init() {
   if (localStorage.getItem('convertToPdf') === 'true') $('convertToPdf').checked = true;
   if (localStorage.getItem('originalPrompt') === 'true' && $('originalPrompt')) $('originalPrompt').checked = true;
   if (localStorage.getItem('reviewConcurrency') && $('reviewConcurrency')) $('reviewConcurrency').value = localStorage.getItem('reviewConcurrency');
+  if (localStorage.getItem('reviewContextWindow') && $('reviewContextWindow')) $('reviewContextWindow').value = localStorage.getItem('reviewContextWindow');
+  if (localStorage.getItem('reviewContextTranslations') === 'true' && $('reviewContextTranslations')) $('reviewContextTranslations').checked = true;
   if (localStorage.getItem('engine')) {
     $('engineSelect').value = localStorage.getItem('engine');
   }
@@ -1664,9 +1677,32 @@ async function deleteJob(id) {
 // ============================================================
 // LLM TRANSLATION REVIEW
 // ============================================================
-let reviewState = { jobId: null, poll: null, filter: 'all' };
+let reviewState = { jobId: null, poll: null, filter: 'all', selected: new Set(), edits: {} };
 
 function escRev(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+// Robust clipboard copy: the Async Clipboard API is unavailable on plain HTTP
+// (non-secure contexts), so fall back to a temporary textarea + execCommand.
+function fallbackCopy(text, okMsg) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast(okMsg, 'success');
+  } catch (e) { toast('Nu s-a putut copia', 'error'); }
+}
+function copyToClipboard(text, okMsg = 'Copiat') {
+  if (text == null) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(() => toast(okMsg, 'success'))
+      .catch(() => fallbackCopy(text, okMsg));
+  } else {
+    fallbackCopy(text, okMsg);
+  }
+}
 
 function ensureReviewModal() {
   if (document.getElementById('reviewModal')) return;
@@ -1692,8 +1728,12 @@ function ensureReviewModal() {
     @media(max-width:720px){.rv-row{grid-template-columns:1fr}}
     .rv-cell-label{font-size:10px;text-transform:uppercase;font-weight:700;color:var(--text3);margin-bottom:3px}
     .rv-text{font-size:13px;background:var(--bg);border-radius:6px;padding:8px;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow-y:auto}
+    .rv-editable{border:1px dashed var(--primary);outline:none}
+    .rv-editable:focus{border-style:solid;box-shadow:0 0 0 2px color-mix(in srgb,var(--primary) 25%,transparent)}
     .rv-sugg{margin-top:8px}
     .rv-sugg .rv-text{border:1px dashed var(--primary)}
+    .rv-badge-filter{cursor:pointer;user-select:none}
+    .rv-badge-filter.active{outline:2px solid var(--primary);outline-offset:1px}
     .rv-issues{margin-top:8px;font-size:12px;color:var(--text2)}
     .rv-issues li{margin-left:16px}
     .rv-empty{padding:24px;text-align:center;color:var(--text3);font-size:13px}
@@ -1719,7 +1759,10 @@ function ensureReviewModal() {
             <select class="form-control" id="rvFilter" style="width:auto;padding:4px 8px;font-size:12px" onchange="reviewState.filter=this.value;renderReviewList()">
               <option value="flagged">Doar cu probleme</option>
               <option value="all">Toate</option>
+              <option value="ok">Doar OK</option>
+              <option value="minor">Doar minore</option>
               <option value="major">Doar majore</option>
+              <option value="error">Doar erori</option>
             </select>
           </span>
         </div>
@@ -1737,6 +1780,7 @@ function ensureReviewModal() {
   document.body.appendChild(ov);
   reviewState.filter = 'flagged';
   reviewState.selected = new Set();
+  reviewState.edits = {};
 }
 
 function jobFilename(jobId) {
@@ -1748,6 +1792,7 @@ async function openReview(jobId) {
   ensureReviewModal();
   reviewState.jobId = jobId;
   reviewState.selected = new Set();
+  reviewState.edits = {};
   reviewState.selInit = false;
   $('rvDownloadLink').style.display = 'none';
   document.getElementById('rvJobName').textContent = jobFilename(jobId);
@@ -1774,15 +1819,18 @@ async function startReviewRun() {
   const ollamaUrl = ($('ollamaUrl') ? $('ollamaUrl').value.trim() : '') || '';
   const numCtx = parseInt(localStorage.getItem('numCtx') || '4096', 10);
   const concurrency = parseInt(($('reviewConcurrency') ? $('reviewConcurrency').value : null) || localStorage.getItem('reviewConcurrency') || '3', 10);
+  const contextWindow = parseInt(($('reviewContextWindow') ? $('reviewContextWindow').value : null) || localStorage.getItem('reviewContextWindow') || '1', 10);
+  const contextTranslations = $('reviewContextTranslations') ? $('reviewContextTranslations').checked : (localStorage.getItem('reviewContextTranslations') === 'true');
   const keepAlive = localStorage.getItem('keepAlive') || '30m';
   $('rvStartBtn').disabled = true;
   reviewState.selected = new Set();
+  reviewState.edits = {};
   reviewState.selInit = false;
   $('rvDownloadLink').style.display = 'none';
   try {
     const resp = await fetch(`/api/jobs/${jobId}/review`, {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ model, ollama_url: ollamaUrl, num_ctx: numCtx, concurrency, keep_alive: keepAlive })
+      body: JSON.stringify({ model, ollama_url: ollamaUrl, num_ctx: numCtx, concurrency, keep_alive: keepAlive, context_window: contextWindow, context_translations: contextTranslations })
     });
     if (!resp.ok) { const err = await resp.json().catch(()=>({})); throw new Error(err.detail || resp.status); }
     const data = await resp.json();
@@ -1829,11 +1877,12 @@ function applyReviewData(data) {
   const sm = data.summary;
   const sumEl = $('rvSummary');
   if (sm) {
+    const af = (v) => reviewState.filter === v ? ' active' : '';
     sumEl.innerHTML =
-      `<span class="badge green">${sm.ok} OK</span>` +
-      `<span class="badge amber">${sm.minor} minore</span>` +
-      `<span class="badge red">${sm.major} majore</span>` +
-      (sm.errors ? `<span class="badge" style="background:var(--bg);border:1px solid var(--border)">${sm.errors} erori</span>` : '') +
+      `<span class="badge green rv-badge-filter${af('ok')}" title="Filtrează: OK" onclick="rvSetFilter('ok')">${sm.ok} OK</span>` +
+      `<span class="badge amber rv-badge-filter${af('minor')}" title="Filtrează: minore" onclick="rvSetFilter('minor')">${sm.minor} minore</span>` +
+      `<span class="badge red rv-badge-filter${af('major')}" title="Filtrează: majore" onclick="rvSetFilter('major')">${sm.major} majore</span>` +
+      (sm.errors ? `<span class="badge rv-badge-filter${af('error')}" style="background:var(--bg);border:1px solid var(--border)" title="Filtrează: erori" onclick="rvSetFilter('error')">${sm.errors} erori</span>` : '') +
       (sm.avg_score ? `<span class="badge blue">Scor mediu ${sm.avg_score}/5</span>` : '');
   } else if (data.status === 'failed') {
     sumEl.innerHTML = `<span class="badge red">Eșuat: ${escRev(data.error||'')}</span>`;
@@ -1857,13 +1906,24 @@ function applyReviewData(data) {
   renderReviewList();
 }
 
+function rvSetFilter(f) {
+  reviewState.filter = f;
+  const sel = $('rvFilter');
+  if (sel) sel.value = f;
+  // Refresh the summary so the active badge highlights, then the list.
+  applyReviewData(_reviewData);
+}
+
 function renderReviewList() {
   const list = $('rvList');
   if (!list) return;
   let results = (_reviewData.results || []).slice();
   const f = reviewState.filter;
   if (f === 'flagged') results = results.filter(r => r.verdict !== 'ok');
+  else if (f === 'ok') results = results.filter(r => r.verdict === 'ok');
+  else if (f === 'minor') results = results.filter(r => r.verdict === 'minor');
   else if (f === 'major') results = results.filter(r => r.verdict === 'major');
+  else if (f === 'error') results = results.filter(r => r.verdict === 'error');
 
   if (!results.length) {
     list.innerHTML = `<div class="rv-empty">${(_reviewData.results||[]).length ? 'Niciun segment în această categorie. 🎉' : (_reviewData.status==='running' ? 'Se analizează...' : 'Niciun rezultat încă.')}</div>`;
@@ -1873,6 +1933,13 @@ function renderReviewList() {
   list.innerHTML = results.map(r => {
     const issues = (r.issues || []).filter(Boolean);
     const sugg = (r.suggestion || '').trim();
+    // Text shown in the editable "to apply" field: a manual edit wins, then
+    // the AI suggestion, otherwise the current translation (so any segment can
+    // be corrected by hand, including ones marked OK).
+    const applyText = reviewState.edits[r.index] != null
+      ? reviewState.edits[r.index]
+      : (sugg || r.translation || '');
+    const lblText = sugg ? 'Aplică propunerea (editabilă)' : 'Aplică editarea manuală';
     return `<div class="rv-card ${r.verdict}">
       <div style="display:flex;align-items:center;gap:8px">
         <span class="badge ${r.verdict==='major'?'red':r.verdict==='minor'?'amber':r.verdict==='ok'?'green':''}">${vlabel[r.verdict]||r.verdict}</span>
@@ -1884,24 +1951,46 @@ function renderReviewList() {
         <div><div class="rv-cell-label">Traducere curentă</div><div class="rv-text">${escRev(r.translation)}</div></div>
       </div>
       ${issues.length?`<div class="rv-issues"><strong>Probleme:</strong><ul>${issues.map(i=>`<li>${escRev(i)}</li>`).join('')}</ul></div>`:''}
-      ${sugg?`<div class="rv-sugg"><div class="rv-cell-label" style="display:flex;align-items:center;gap:8px"><label style="display:flex;align-items:center;gap:5px;text-transform:none;font-weight:600;color:var(--text2);cursor:pointer"><input type="checkbox" class="rv-apply-cb" data-idx="${r.index}" ${reviewState.selected.has(r.index)?'checked':''} onchange="rvToggleOne(${r.index}, this.checked)"> Aplică această propunere</label><button class="copy-btn" style="margin-left:auto;background:none;border:1px solid var(--border);color:var(--text3);border-radius:4px;font-size:11px;padding:1px 6px;cursor:pointer" onclick="navigator.clipboard.writeText(this.closest('.rv-sugg').querySelector('.rv-text').textContent);toast('Copiat','success')">Copiază</button></div><div class="rv-text">${escRev(sugg)}</div></div>`:''}
+      <div class="rv-sugg">
+        <div class="rv-cell-label" style="display:flex;align-items:center;gap:8px">
+          <label style="display:flex;align-items:center;gap:5px;text-transform:none;font-weight:600;color:var(--text2);cursor:pointer"><input type="checkbox" class="rv-apply-cb" data-idx="${r.index}" ${reviewState.selected.has(r.index)?'checked':''} onchange="rvToggleOne(${r.index}, this.checked)"> ${lblText}</label>
+          <button class="copy-btn" style="margin-left:auto;background:none;border:1px solid var(--border);color:var(--text3);border-radius:4px;font-size:11px;padding:1px 6px;cursor:pointer" onclick="copyToClipboard(this.closest('.rv-card').querySelector('.rv-editable').innerText)">Copiază</button>
+        </div>
+        <div class="rv-text rv-editable" contenteditable="true" spellcheck="false" data-idx="${r.index}" oninput="rvSetEdit(${r.index}, this.innerText)">${escRev(applyText)}</div>
+      </div>
     </div>`;
   }).join('');
   updateApplyBar();
 }
 
+// Segments that can be written to the revised document: those with an AI
+// suggestion plus any the user has manually edited.
+function rvApplicableIndices() {
+  const idx = new Set((_reviewData.results || [])
+    .filter(r => (r.suggestion || '').trim()).map(r => r.index));
+  Object.keys(reviewState.edits).forEach(k => idx.add(Number(k)));
+  return idx;
+}
+
 function updateApplyBar() {
   const foot = $('rvFoot');
   if (!foot) return;
-  const all = _reviewData.results || [];
-  const suggIdx = all.filter(r => (r.suggestion||'').trim()).map(r => r.index);
+  const applicable = rvApplicableIndices();
   const running = _reviewData.status === 'running';
-  if (!suggIdx.length) { foot.style.display = 'none'; return; }
+  if (!applicable.size) { foot.style.display = 'none'; return; }
   foot.style.display = 'flex';
-  const selCount = suggIdx.filter(i => reviewState.selected.has(i)).length;
-  $('rvSelCount').textContent = `${selCount} din ${suggIdx.length} propuneri selectate`;
-  $('rvSelAll').checked = selCount === suggIdx.length && selCount > 0;
+  const selCount = [...applicable].filter(i => reviewState.selected.has(i)).length;
+  $('rvSelCount').textContent = `${selCount} din ${applicable.size} propuneri selectate`;
+  $('rvSelAll').checked = selCount === applicable.size && selCount > 0;
   $('rvApplyBtn').disabled = running || selCount === 0;
+}
+
+function rvSetEdit(idx, text) {
+  reviewState.edits[idx] = text;
+  reviewState.selected.add(idx);
+  const cb = document.querySelector(`.rv-apply-cb[data-idx="${idx}"]`);
+  if (cb) cb.checked = true;
+  updateApplyBar();
 }
 
 function rvToggleOne(idx, checked) {
@@ -1910,8 +1999,7 @@ function rvToggleOne(idx, checked) {
 }
 
 function rvToggleAll(checked) {
-  const suggIdx = (_reviewData.results || []).filter(r => (r.suggestion||'').trim()).map(r => r.index);
-  reviewState.selected = checked ? new Set(suggIdx) : new Set();
+  reviewState.selected = checked ? rvApplicableIndices() : new Set();
   document.querySelectorAll('.rv-apply-cb').forEach(cb => { cb.checked = checked; });
   updateApplyBar();
 }
@@ -1919,12 +2007,15 @@ function rvToggleAll(checked) {
 async function applyReview() {
   const indices = [...reviewState.selected];
   if (!indices.length) { toast('Selectează cel puțin o propunere', 'warning'); return; }
+  // Send manual edits for any selected segment that has one.
+  const edits = {};
+  for (const i of indices) if (reviewState.edits[i] != null) edits[i] = reviewState.edits[i];
   const btn = $('rvApplyBtn');
   btn.disabled = true; btn.textContent = 'Se generează...';
   try {
     const resp = await fetch(`/api/jobs/${reviewState.jobId}/review/apply`, {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ indices })
+      body: JSON.stringify({ indices, edits })
     });
     if (!resp.ok) { const err = await resp.json().catch(()=>({})); throw new Error(err.detail || resp.status); }
     const data = await resp.json();
@@ -2090,6 +2181,8 @@ function saveSettings() {
   if ($('originalPrompt')) localStorage.setItem('originalPrompt', $('originalPrompt').checked);
   if ($('reviewModelSelect')) localStorage.setItem('reviewModel', $('reviewModelSelect').value);
   if ($('reviewConcurrency')) localStorage.setItem('reviewConcurrency', $('reviewConcurrency').value);
+  if ($('reviewContextWindow')) localStorage.setItem('reviewContextWindow', $('reviewContextWindow').value);
+  if ($('reviewContextTranslations')) localStorage.setItem('reviewContextTranslations', $('reviewContextTranslations').checked);
 }
 
 function swapLangs() {
