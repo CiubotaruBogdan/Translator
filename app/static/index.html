@@ -714,6 +714,12 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
             <input class="form-control" id="reviewContextWindow" type="number" min="0" max="5" value="1" style="max-width:120px">
             <div class="form-hint">Câte segmente din original, dinainte și de după, sunt date verificatorului ca context (doar pentru înțelegere, nu se evaluează). 0 = fără context.</div>
           </div>
+          <div class="form-group">
+            <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="reviewContextTranslations" style="width:auto;margin:0"> Include și traducerile vecine în context
+            </label>
+            <div class="form-hint">Pe lângă originalul vecin, trimite și traducerea segmentelor vecine — ajută la consistența terminologică și fluența între segmente.</div>
+          </div>
         </div>
       </div>
 
@@ -1003,6 +1009,7 @@ function init() {
   if (localStorage.getItem('originalPrompt') === 'true' && $('originalPrompt')) $('originalPrompt').checked = true;
   if (localStorage.getItem('reviewConcurrency') && $('reviewConcurrency')) $('reviewConcurrency').value = localStorage.getItem('reviewConcurrency');
   if (localStorage.getItem('reviewContextWindow') && $('reviewContextWindow')) $('reviewContextWindow').value = localStorage.getItem('reviewContextWindow');
+  if (localStorage.getItem('reviewContextTranslations') === 'true' && $('reviewContextTranslations')) $('reviewContextTranslations').checked = true;
   if (localStorage.getItem('engine')) {
     $('engineSelect').value = localStorage.getItem('engine');
   }
@@ -1813,6 +1820,7 @@ async function startReviewRun() {
   const numCtx = parseInt(localStorage.getItem('numCtx') || '4096', 10);
   const concurrency = parseInt(($('reviewConcurrency') ? $('reviewConcurrency').value : null) || localStorage.getItem('reviewConcurrency') || '3', 10);
   const contextWindow = parseInt(($('reviewContextWindow') ? $('reviewContextWindow').value : null) || localStorage.getItem('reviewContextWindow') || '1', 10);
+  const contextTranslations = $('reviewContextTranslations') ? $('reviewContextTranslations').checked : (localStorage.getItem('reviewContextTranslations') === 'true');
   const keepAlive = localStorage.getItem('keepAlive') || '30m';
   $('rvStartBtn').disabled = true;
   reviewState.selected = new Set();
@@ -1822,7 +1830,7 @@ async function startReviewRun() {
   try {
     const resp = await fetch(`/api/jobs/${jobId}/review`, {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ model, ollama_url: ollamaUrl, num_ctx: numCtx, concurrency, keep_alive: keepAlive, context_window: contextWindow })
+      body: JSON.stringify({ model, ollama_url: ollamaUrl, num_ctx: numCtx, concurrency, keep_alive: keepAlive, context_window: contextWindow, context_translations: contextTranslations })
     });
     if (!resp.ok) { const err = await resp.json().catch(()=>({})); throw new Error(err.detail || resp.status); }
     const data = await resp.json();
@@ -2174,6 +2182,7 @@ function saveSettings() {
   if ($('reviewModelSelect')) localStorage.setItem('reviewModel', $('reviewModelSelect').value);
   if ($('reviewConcurrency')) localStorage.setItem('reviewConcurrency', $('reviewConcurrency').value);
   if ($('reviewContextWindow')) localStorage.setItem('reviewContextWindow', $('reviewContextWindow').value);
+  if ($('reviewContextTranslations')) localStorage.setItem('reviewContextTranslations', $('reviewContextTranslations').checked);
 }
 
 function swapLangs() {
