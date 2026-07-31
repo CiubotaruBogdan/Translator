@@ -1837,6 +1837,7 @@ function ensureReviewModal() {
         <span id="rvSelCount" style="font-size:12px;color:var(--text3)"></span>
         <button class="btn btn-sm btn-primary" style="margin-left:auto" id="rvApplyBtn" onclick="applyReview()">Generează document revizuit</button>
         <a id="rvDownloadLink" href="#" style="display:none;font-size:13px;color:var(--green);text-decoration:none;font-weight:600">⬇ Descarcă documentul revizuit</a>
+        <button class="btn btn-sm btn-secondary" id="rvExportHtmlBtn" onclick="exportReviewHtml()" style="display:none;margin-left:6px">📄 Exportă raport HTML</button>
       </div>
     </div>`;
   document.body.appendChild(ov);
@@ -1965,6 +1966,11 @@ function applyReviewData(data) {
     dl.href = `/api/jobs/${reviewState.jobId}/review/download`;
     dl.style.display = '';
   }
+  // Show export HTML button when review has results (completed or partial)
+  const exportBtn = $('rvExportHtmlBtn');
+  if (exportBtn) {
+    exportBtn.style.display = (data.results && data.results.length && !running) ? '' : 'none';
+  }
   renderReviewList();
 }
 
@@ -2090,6 +2096,19 @@ async function applyReview() {
     toast('Eroare la generarea documentului: ' + e.message, 'error');
   } finally {
     btn.disabled = false; btn.textContent = 'Generează document revizuit';
+  }
+}
+
+async function exportReviewHtml() {
+  const btn = $('rvExportHtmlBtn');
+  btn.disabled = true; btn.textContent = 'Se generează...';
+  try {
+    window.open(`/api/jobs/${reviewState.jobId}/review/export-html`, '_blank');
+    toast('Raport HTML exportat', 'success');
+  } catch (e) {
+    toast('Eroare la export: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '\uD83D\uDCC4 Exportă raport HTML';
   }
 }
 

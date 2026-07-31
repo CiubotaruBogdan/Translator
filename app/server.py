@@ -226,6 +226,8 @@ class TranslationJob:
         self.source_segments = []   # clean original text per segment (for review)
         self.events = []
         self.cancelled = False
+        self.original_filename = None   # name of the original (source-language) file for review
+        self.original_docx_segments = [] # DOCX segment metadata for the original file
         # --- LLM review state ---
         self.review_status = None       # None | 'running' | 'completed' | 'failed'
         self.review_model = None
@@ -237,6 +239,7 @@ class TranslationJob:
         self.review_error = None
         self.review_cancel = False
         self.revised_output_file = None  # revised document after applying suggestions
+        self.review_export_file = None    # HTML export of review suggestions
 
     def add_event(self, etype, message, detail=""):
         self.events.append({
@@ -1152,6 +1155,12 @@ async def run_pipeline(job: TranslationJob):
         # Keep clean source text per segment for the optional LLM review step
         job.source_segments = [INLINE_MARKER_RE.sub("", c["text"]) for c in chunks_to_translate]
 
+        # Store original file reference for review revised-document generation
+        # (the original uploaded file is at UPLOAD_DIR/{job_id}_{filename})
+        job.original_filename = job.filename
+        if use_docx_pipeline:
+            job.original_docx_segments = segments
+
         engine_info = f"engine={job.engine}"
         if job.engine == 'libretranslate':
             engine_info += f", url={job.libretranslate_url}"
@@ -1702,24 +1711,35 @@ async def run_review(job: TranslationJob, model: str, url: str,
 def build_revised_document(job: TranslationJob, revised_translations: list[str]):
     """
     Build a new document from the (possibly improved) translations.
-    For DOCX sources we reapply onto the original file to keep formatting;
-    otherwise we produce a clean text/DOCX with the revised content.
+    IMPORTANT: The revised document preserves the formatting of the ORIGINAL
+    (source-language) document, not the translated one. This ensures styles,
+    fonts, bold, italic, tables, etc. from the original are kept intact.
     Returns (output_path, download_name).
     """
-    ext = Path(job.filename).suffix.lower()
-    stem = Path(job.filename).stem
-    original_upload = UPLOAD_DIR / f"{job.job_id}_{job.filename}"
+    # Determine the original file path and its DOCX segments
+    orig_filename = job.original_filename or job.filename
+    orig_docx_segments = job.original_docx_segments or []
 
-    # Format-preserving path: original DOCX still available
-    if ext == '.docx' and job.docx_segments and original_upload.exists():
+    # For verify jobs, original is stored as {job_id}_orig_{filename}
+    # For translate jobs, original is stored as {job_id}_{filename}
+    if job.kind == "verify":
+        original_path = UPLOAD_DIR / f"{job.job_id}_orig_{orig_filename}"
+    else:
+        original_path = UPLOAD_DIR / f"{job.job_id}_{orig_filename}"
+
+    orig_ext = Path(orig_filename).suffix.lower()
+    stem = Path(orig_filename).stem
+
+    # Format-preserving path: original DOCX still available with segment metadata
+    if orig_ext == '.docx' and orig_docx_segments and original_path.exists():
         out_name = f"{stem}_{job.target_lang}_revizuit_review.docx"
         out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
-        apply_translations_to_docx(original_upload, job.docx_segments,
+        apply_translations_to_docx(original_path, orig_docx_segments,
                                    revised_translations, out_path)
         return out_path, out_name
 
     # Plain text source
-    if ext in ('.txt', '.text', '.md'):
+    if orig_ext in ('.txt', '.text', '.md'):
         out_name = f"{stem}_{job.target_lang}_revizuit_review.txt"
         out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
         with open(out_path, 'w', encoding='utf-8') as f:
@@ -1942,7 +1962,7 @@ async def api_verify_documents(
     trans_path.write_bytes(trans_bytes)
 
     try:
-        src_texts, _ = extract_review_segments(orig_path)
+        src_texts, orig_docx = extract_review_segments(orig_path)
         tgt_texts, tgt_docx = extract_review_segments(trans_path)
     except Exception as e:
         raise HTTPException(400, f"Nu am putut citi documentele: {e}")
@@ -1957,6 +1977,8 @@ async def api_verify_documents(
     tgt_texts = tgt_texts[:n]
     if tgt_docx is not None:
         tgt_docx = tgt_docx[:n]
+    if orig_docx is not None:
+        orig_docx = orig_docx[:n]
 
     client_ip = request.client.host if request and request.client else "-"
     job = TranslationJob(job_id, translated.filename, source_lang, target_lang,
@@ -1970,6 +1992,8 @@ async def api_verify_documents(
     job.source_segments = src_texts
     job.translated_chunks = tgt_texts
     job.docx_segments = tgt_docx or []
+    job.original_filename = original.filename
+    job.original_docx_segments = orig_docx or []
     job.total_chunks = n
     job.completed_chunks = n
     job.output_file = translated.filename
@@ -2108,6 +2132,124 @@ async def api_review_download(job_id: str):
     return FileResponse(str(path), filename=job.revised_output_file)
 
 
+@app.get("/api/jobs/{job_id}/review/export-html")
+async def api_review_export_html(job_id: str):
+    """Export all review suggestions as a standalone HTML file that mirrors
+    the graphical interface layout (original, translation, verdict, issues,
+    suggestion, score)."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    job = jobs[job_id]
+    if not job.review_results:
+        raise HTTPException(400, "Rulează mai întâi verificarea.")
+
+    html = _build_review_export_html(job)
+    filename = f"{Path(job.filename).stem}_verificare_{job.target_lang}.html"
+    out_path = OUTPUT_DIR / f"{job.job_id}_export_{filename}"
+    out_path.write_text(html, encoding='utf-8')
+    job.review_export_file = filename
+    return FileResponse(str(out_path), filename=filename, media_type="text/html")
+
+
+def _build_review_export_html(job: TranslationJob) -> str:
+    """Generate a standalone HTML document replicating the review modal UI."""
+    import html as html_mod
+    results = job.review_results
+    summary = job.review_summary or _review_summary(results)
+    src_name = LANG_EN.get(job.source_lang, job.source_lang)
+    tgt_name = LANG_EN.get(job.target_lang, job.target_lang)
+
+    def esc(text):
+        return html_mod.escape(str(text or ""))
+
+    verdict_labels = {'ok': 'OK', 'minor': 'Minor', 'major': 'Major', 'error': 'Eroare', 'unknown': '?'}
+    verdict_colors = {'ok': '#16a34a', 'minor': '#d97706', 'major': '#dc2626', 'error': '#94a3b8', 'unknown': '#94a3b8'}
+    verdict_bg = {'ok': '#dcfce7', 'minor': '#fef3c7', 'major': '#fee2e2', 'error': '#f1f5f9', 'unknown': '#f1f5f9'}
+    border_colors = {'ok': '#16a34a', 'minor': '#d97706', 'major': '#dc2626', 'error': '#94a3b8', 'unknown': '#94a3b8'}
+
+    rows_html = []
+    for r in results:
+        v = r.get('verdict', 'unknown')
+        issues = r.get('issues', [])
+        issues_html = ''
+        if issues:
+            items = ''.join(f'<li>{esc(i)}</li>' for i in issues if i)
+            issues_html = f'<div class="issues"><strong>Probleme:</strong><ul>{items}</ul></div>'
+        sugg = (r.get('suggestion') or '').strip()
+        sugg_html = ''
+        if sugg:
+            sugg_html = f'<div class="suggestion"><div class="cell-label">Sugestie de îmbunătățire</div><div class="text sugg-text">{esc(sugg)}</div></div>'
+        score_html = f'<span class="score">scor {r["score"]}/5</span>' if r.get('score') else ''
+        rows_html.append(f'''
+        <div class="card" style="border-left-color:{border_colors.get(v, '#94a3b8')}">
+          <div class="card-head">
+            <span class="badge" style="background:{verdict_bg.get(v, '#f1f5f9')};color:{verdict_colors.get(v, '#94a3b8')}">{verdict_labels.get(v, v)}</span>
+            {score_html}
+            <span class="seg-num">segment #{r.get("index", 0) + 1}</span>
+          </div>
+          <div class="row">
+            <div><div class="cell-label">Original ({esc(src_name)})</div><div class="text">{esc(r.get("source", ""))}</div></div>
+            <div><div class="cell-label">Traducere ({esc(tgt_name)})</div><div class="text">{esc(r.get("translation", ""))}</div></div>
+          </div>
+          {issues_html}
+          {sugg_html}
+        </div>''')
+
+    summary_html = ''
+    if summary:
+        summary_html = f'''
+        <div class="summary">
+          <span class="badge" style="background:#dcfce7;color:#16a34a">{summary.get('ok', 0)} OK</span>
+          <span class="badge" style="background:#fef3c7;color:#d97706">{summary.get('minor', 0)} minore</span>
+          <span class="badge" style="background:#fee2e2;color:#dc2626">{summary.get('major', 0)} majore</span>
+          {('<span class="badge" style="background:#f1f5f9;color:#94a3b8">' + str(summary.get('errors', 0)) + ' erori</span>') if summary.get('errors') else ''}
+          {('<span class="badge" style="background:#dbeafe;color:#2563eb">Scor mediu ' + str(summary.get('avg_score', '')) + '/5</span>') if summary.get('avg_score') else ''}
+        </div>'''
+
+    return f'''<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Verificare traducere — {esc(job.filename)}</title>
+<style>
+*,*::before,*::after{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f8fafc;color:#0f172a;padding:24px;max-width:960px;margin:0 auto}}
+h1{{font-size:20px;font-weight:700;color:#2563eb;margin-bottom:4px}}
+.meta{{font-size:13px;color:#475569;margin-bottom:16px}}
+.summary{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}}
+.badge{{display:inline-flex;align-items:center;padding:4px 12px;border-radius:12px;font-size:12px;font-weight:600}}
+.card{{border:1px solid #e2e8f0;border-left:4px solid #94a3b8;border-radius:10px;padding:14px;margin-bottom:12px;background:#fff}}
+.card-head{{display:flex;align-items:center;gap:8px;margin-bottom:8px}}
+.seg-num{{font-size:11px;color:#94a3b8;margin-left:auto}}
+.score{{font-size:12px;color:#94a3b8}}
+.row{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
+@media(max-width:720px){{.row{{grid-template-columns:1fr}}}}
+.cell-label{{font-size:10px;text-transform:uppercase;font-weight:700;color:#94a3b8;margin-bottom:3px}}
+.text{{font-size:13px;background:#f8fafc;border-radius:6px;padding:8px;white-space:pre-wrap;word-break:break-word;border:1px solid #e2e8f0}}
+.sugg-text{{border:1px dashed #2563eb;background:#eff6ff}}
+.issues{{margin-top:8px;font-size:12px;color:#475569}}
+.issues ul{{margin-left:18px}}
+.issues li{{margin-bottom:2px}}
+.suggestion{{margin-top:10px}}
+.footer{{margin-top:24px;padding-top:16px;border-top:1px solid #e2e8f0;font-size:11px;color:#94a3b8;text-align:center}}
+</style>
+</head>
+<body>
+<h1>\U0001f50d Verificare traducere</h1>
+<div class="meta">
+  <strong>Fișier:</strong> {esc(job.filename)} &nbsp;|&nbsp;
+  <strong>Limbi:</strong> {esc(src_name)} → {esc(tgt_name)} &nbsp;|&nbsp;
+  <strong>Model:</strong> {esc(job.review_model or '-')} &nbsp;|&nbsp;
+  <strong>Segmente:</strong> {len(results)}
+</div>
+{summary_html}
+{''.join(rows_html)}
+<div class="footer">Generat de Traducător Offline · {datetime.now().strftime("%Y-%m-%d %H:%M")}</div>
+</body>
+</html>'''
+
+
 class ReviewTextRequest(BaseModel):
     source_text: str
     translated_text: str
@@ -2154,11 +2296,21 @@ async def api_delete(job_id: str):
     if job_id not in jobs:
         raise HTTPException(404)
     job = jobs.pop(job_id)
-    for p in [UPLOAD_DIR / f"{job_id}_{job.filename}",
-              OUTPUT_DIR / f"{job_id}_{job.output_file}" if job.output_file else None,
-              OUTPUT_DIR / f"{job_id}_rev_{job.revised_output_file}" if job.revised_output_file else None]:
+    paths_to_clean = [
+        UPLOAD_DIR / f"{job_id}_{job.filename}",
+        OUTPUT_DIR / f"{job_id}_{job.output_file}" if job.output_file else None,
+        OUTPUT_DIR / f"{job_id}_rev_{job.revised_output_file}" if job.revised_output_file else None,
+        OUTPUT_DIR / f"{job_id}_export_{job.review_export_file}" if job.review_export_file else None,
+    ]
+    # For verify jobs, also clean the original file
+    if job.kind == "verify" and job.original_filename:
+        paths_to_clean.append(UPLOAD_DIR / f"{job_id}_orig_{job.original_filename}")
+    for p in paths_to_clean:
         if p and p.exists():
-            p.unlink()
+            try:
+                p.unlink()
+            except:
+                pass
     return {"ok": True}
 
 @app.post("/api/jobs/stop-all")
