@@ -788,17 +788,26 @@ def extract_text_from_txt(filepath: Path) -> list[str]:
             paragraphs.append(cleaned)
     return paragraphs
 
-def extract_review_segments(filepath: Path):
+def extract_review_segments(filepath: Path, paragraphs_only: bool = False):
     """Segment an already-finished document for review.
 
     Returns ``(segment_texts, docx_segments)`` where ``docx_segments`` is the
     structural metadata (only for DOCX, used to rebuild a revised document) or
     ``None`` for plain-text/PDF sources. DOCX paragraphs keep their inline
     ⟦n⟧ markers so applied corrections can preserve bold/italic.
+
+    When ``paragraphs_only`` is True, table cells are excluded from extraction.
+    This is used for the external verify flow where tables should remain
+    untouched from the original document.
     """
     ext = filepath.suffix.lower()
     if ext == '.docx':
         segs = extract_docx_segments(filepath, tag_inline=True)
+        if paragraphs_only:
+            segs = [s for s in segs if s["type"] == "paragraph"]
+            # Re-index after filtering
+            for i, s in enumerate(segs):
+                s["index"] = i
         return [s['text'] for s in segs], segs
     if ext == '.pdf':
         return extract_text_from_pdf(filepath), None
@@ -1708,12 +1717,76 @@ async def run_review(job: TranslationJob, model: str, url: str,
         emit(job)
 
 
+def _inject_markers_proportional(orig_tagged: str, new_text: str) -> str:
+    """
+    Given the original segment text WITH ⟦n⟧ markers and a plain (untagged)
+    new translation text, inject the markers into the new text at proportional
+    positions so that apply_translations_to_docx can distribute the text across
+    the original formatting runs.
+
+    Example:
+      orig_tagged = "⟦0⟧Normal text ⟦1⟧bold part⟦2⟧ and end"
+      new_text    = "Translated normal bold translated and end translated"
+      -> returns   "⟦0⟧Translated normal ⟦1⟧bold translated⟦2⟧ and end translated"
+      (markers placed at proportional character positions)
+    """
+    # If new_text already has markers, return as-is
+    if INLINE_MARKER_RE.search(new_text):
+        return new_text
+
+    # Extract marker positions from original (as fraction of total text length)
+    # Find all markers and their positions in the clean text
+    markers = list(INLINE_MARKER_RE.finditer(orig_tagged))
+    if not markers:
+        return new_text
+
+    # Get the clean original text (without markers) and compute proportional positions
+    clean_orig = INLINE_MARKER_RE.sub("", orig_tagged)
+    orig_len = len(clean_orig) if clean_orig else 1
+    new_len = len(new_text)
+
+    # Calculate where each marker sits in the clean original text
+    # (how many clean chars precede it)
+    marker_positions = []  # list of (marker_string, char_offset_in_clean)
+    clean_offset = 0
+    i = 0
+    orig_str = orig_tagged
+    while i < len(orig_str):
+        m = INLINE_MARKER_RE.match(orig_str, i)
+        if m:
+            marker_positions.append((m.group(), clean_offset))
+            i = m.end()
+        else:
+            clean_offset += 1
+            i += 1
+
+    # Now place markers in new_text at proportional positions
+    # Sort by position (should already be sorted)
+    result_parts = []
+    last_cut = 0
+    for marker_str, orig_char_pos in marker_positions:
+        # Proportional position in new text
+        if orig_len > 0:
+            new_pos = int(round(orig_char_pos * new_len / orig_len))
+        else:
+            new_pos = 0
+        new_pos = max(last_cut, min(new_pos, new_len))
+        result_parts.append(new_text[last_cut:new_pos])
+        result_parts.append(marker_str)
+        last_cut = new_pos
+    result_parts.append(new_text[last_cut:])
+    return "".join(result_parts)
+
+
 def build_revised_document(job: TranslationJob, revised_translations: list[str]):
     """
     Build a new document from the (possibly improved) translations.
-    IMPORTANT: The revised document preserves the formatting of the ORIGINAL
-    (source-language) document, not the translated one. This ensures styles,
-    fonts, bold, italic, tables, etc. from the original are kept intact.
+
+    IMPORTANT: The revised document is a FULL COPY of the ORIGINAL document
+    (preserving tables, images, headers, footers, styles, fonts, etc.).
+    Only the text paragraphs that were verified/translated are replaced.
+    Tables and images remain exactly as in the original.
+
     Returns (output_path, download_name).
     """
     # Determine the original file path and its DOCX segments
@@ -1734,8 +1807,39 @@ def build_revised_document(job: TranslationJob, revised_translations: list[str])
     if orig_ext == '.docx' and orig_docx_segments and original_path.exists():
         out_name = f"{stem}_{job.target_lang}_revizuit_review.docx"
         out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
-        apply_translations_to_docx(original_path, orig_docx_segments,
-                                   revised_translations, out_path)
+
+        # First, make a byte-level copy of the original to preserve EVERYTHING
+        # (images, shapes, headers, footers, embedded objects, etc.)
+        shutil.copy2(str(original_path), str(out_path))
+
+        # Now open the copy and ONLY replace the paragraph text segments.
+        # Tables, images, and other elements remain untouched.
+        # Filter to only paragraph segments (skip table_cell for verify jobs
+        # since tables should remain as in original)
+        para_segments = [s for s in orig_docx_segments if s["type"] == "paragraph"]
+
+        # Build the translation list aligned with paragraph segments only
+        para_translations = []
+        for seg in orig_docx_segments:
+            idx = seg["index"]
+            if idx < len(revised_translations):
+                rev_text = revised_translations[idx]
+            else:
+                rev_text = ""
+            if seg["type"] == "paragraph":
+                # Inject markers if the original had multi-run formatting
+                if seg.get("multi_run") and rev_text:
+                    rev_text = _inject_markers_proportional(seg["text"], rev_text)
+                para_translations.append((seg["para_index"], rev_text, seg.get("multi_run", False)))
+
+        # Open the copied document and replace only paragraph text
+        doc = docx.Document(str(out_path))
+        for para_index, trans_text, multi_run in para_translations:
+            if not trans_text or trans_text.startswith("[TRANSLATION ERROR"):
+                continue
+            if para_index < len(doc.paragraphs):
+                _apply_paragraph_translation(doc.paragraphs[para_index], trans_text, multi_run)
+        doc.save(str(out_path))
         return out_path, out_name
 
     # Plain text source
@@ -1962,8 +2066,10 @@ async def api_verify_documents(
     trans_path.write_bytes(trans_bytes)
 
     try:
-        src_texts, orig_docx = extract_review_segments(orig_path)
-        tgt_texts, tgt_docx = extract_review_segments(trans_path)
+        # Extract only paragraphs (skip table cells) — tables and images
+        # remain untouched from the original in the revised document.
+        src_texts, orig_docx = extract_review_segments(orig_path, paragraphs_only=True)
+        tgt_texts, tgt_docx = extract_review_segments(trans_path, paragraphs_only=True)
     except Exception as e:
         raise HTTPException(400, f"Nu am putut citi documentele: {e}")
 
