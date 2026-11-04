@@ -292,7 +292,11 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
 
     </div>
     <div class="sidebar-nav">
-      <div class="nav-item active" data-page="translate" onclick="showPage('translate')">
+      <div class="nav-item active" data-page="dashboard" onclick="showPage('dashboard')">
+        <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+        Dashboard
+      </div>
+      <div class="nav-item" data-page="translate" onclick="showPage('translate')">
         <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
         Traducere documente
       </div>
@@ -313,10 +317,6 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         Job-uri
         <span class="nav-badge" id="jobsBadge" style="display:none">0</span>
       </div>
-      <div class="nav-item" data-page="dashboard" onclick="showPage('dashboard')">
-        <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
-        Dashboard
-      </div>
       <div class="nav-item" data-page="settings" onclick="showPage('settings')">
         <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1115.6 12 3.611 3.611 0 0112 15.6z"/></svg>
         Setări
@@ -335,6 +335,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
       <div id="serverUptime" style="font-size:11px;color:var(--text3)">Uptime: --</div>
       <div style="margin-top:6px"><a href="/logs.html" target="_blank" style="font-size:11px;color:var(--text3);text-decoration:underline">Loguri & Sistem</a></div>
       <div style="margin-top:2px"><a href="/prompts.html" target="_blank" style="font-size:11px;color:var(--text3);text-decoration:underline">Istoric traduceri (CMD)</a></div>
+      <div style="margin-top:10px;font-size:11px;line-height:1.6;color:var(--text2)">Aplicație dezvoltată de<br><a href="https://github.com/CiubotaruBogdan" target="_blank" rel="noopener noreferrer">Bogdan Ciubotaru</a></div>
     </div>
   </div>
 
@@ -400,7 +401,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
     </div>
 
     <!-- ==================== PAGE: TRANSLATE (DOCUMENTS) ==================== -->
-    <div class="page active" id="page-translate">
+    <div class="page" id="page-translate">
       <h2 class="page-title">Traducere documente</h2>
 
       <!-- Language selection -->
@@ -466,7 +467,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
     </div>
 
     <!-- ==================== PAGE: DASHBOARD ==================== -->
-    <div class="page" id="page-dashboard">
+    <div class="page active" id="page-dashboard">
       <h2 class="page-title">Dashboard server</h2>
 
       <!-- Stats -->
@@ -672,7 +673,22 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
               <div id="verifyTransSelected" style="margin-top:10px"></div>
             </div>
           </div>
-          <div class="form-hint" style="margin-top:10px">Pentru rezultate corecte, cele două documente trebuie să aibă aceeași structură (același număr de paragrafe). Modelul de verificare și contextul se configurează în <em>Setări → Model de verificare</em>.</div>
+          <div class="form-hint" style="margin-top:10px">Pentru rezultate corecte, cele două documente trebuie să aibă aceeași structură (inclusiv paragrafele din tabele). Contextul se configurează în <em>Setări → Model de verificare</em>.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><span class="card-title">Model de verificare</span><button class="btn btn-sm btn-secondary" onclick="refreshModels()">Reîncarcă modele</button></div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label" for="verifyReviewModelSelect">Alege un model Ollama</label>
+            <select class="form-control" id="verifyReviewModelSelect" onchange="setReviewModelSelection(this.value)"><option value="">Implicit (modelul de traducere)</option></select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="verifyReviewCustomModel">Sau nume model introdus manual</label>
+            <input class="form-control" id="verifyReviewCustomModel" placeholder="ex: qwen2.5:7b" oninput="setReviewCustomModel(this.value)">
+            <div class="form-hint">Modelul ales va fi folosit la verificarea automată. Îl poți schimba și în fereastra de verificare.</div>
+          </div>
         </div>
       </div>
 
@@ -760,11 +776,16 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         </div>
         <div class="card-body">
           <div class="form-group">
-            <label class="form-label">Model folosit la verificarea traducerilor</label>
-            <select class="form-control" id="reviewModelSelect">
+            <label class="form-label" for="reviewModelSelect">Model folosit la verificarea traducerilor</label>
+            <select class="form-control" id="reviewModelSelect" onchange="setReviewModelSelection(this.value)">
               <option value="">Implicit (același cu modelul de traducere)</option>
             </select>
             <div class="form-hint">Un model LLM generalist (ex: llama3.1:8b, qwen2.5) compară originalul cu traducerea și propune îmbunătățiri. Recomandat un model diferit, mai capabil decât cel de traducere.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="reviewCustomModel">Sau nume model introdus manual</label>
+            <input class="form-control" id="reviewCustomModel" placeholder="ex: qwen2.5:7b" oninput="setReviewCustomModel(this.value)">
+            <div class="form-hint">Numele introdus manual are prioritate. Alegerea unui model din listă golește acest câmp. Alegerea se aplică imediat tuturor verificărilor.</div>
           </div>
           <div class="form-group">
             <label class="form-label">Concurență verificare</label>
@@ -1075,6 +1096,7 @@ function init() {
   if (localStorage.getItem('engine')) {
     $('engineSelect').value = localStorage.getItem('engine');
   }
+  syncReviewModelControls();
   onEngineChange();  // Show/hide appropriate settings
   checkLibreOffice();  // Check LibreOffice availability
 
@@ -1228,7 +1250,7 @@ function renderFileList() {
     `<div class="file-item">
       <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
       <div class="file-item-info">
-        <div class="file-item-name">${f.name}</div>
+        <div class="file-item-name">${escRev(f.name)}</div>
         <div class="file-item-size">${fmtBytes(f.size)}</div>
       </div>
       <button class="file-item-remove" onclick="removeFile(${i})" title="Elimină">
@@ -1372,7 +1394,7 @@ function renderActiveJobs() {
   panel.innerHTML = jobIds.map(jid => {
     const j = activeJobs[jid];
     const d = j.data;
-    if (!d) return `<div class="card active-job-card"><div class="card-body"><span class="spinner-dark"></span> Se inițializează ${j.filename}...</div></div>`;
+    if (!d) return `<div class="card active-job-card"><div class="card-body"><span class="spinner-dark"></span> Se inițializează ${escRev(j.filename)}...</div></div>`;
 
     const isFinished = ['completed','failed','cancelled'].includes(d.status);
     const statusColors = {completed:'green',failed:'red',cancelled:'amber'};
@@ -1383,12 +1405,12 @@ function renderActiveJobs() {
 
     const icons = {success:'✓', error:'✗', warning:'⚠', info:'ℹ'};
     const eventsHtml = (d.events || []).map(ev =>
-      `<div class="event-line"><span class="event-time">${ev.time}</span><span class="event-type ${ev.type}">${icons[ev.type]||'·'}</span><span class="event-msg"><strong>${ev.message}</strong> ${ev.detail ? '— '+ev.detail : ''}</span></div>`
+      `<div class="event-line"><span class="event-time">${ev.time}</span><span class="event-type ${ev.type}">${icons[ev.type]||'·'}</span><span class="event-msg"><strong>${escRev(ev.message)}</strong> ${ev.detail ? '— '+escRev(ev.detail) : ''}</span></div>`
     ).join('');
 
     return `<div class="card active-job-card">
       <div class="card-header">
-        <span class="card-title">${d.filename}</span>
+        <span class="card-title">${escRev(d.filename)}</span>
         <div style="display:flex;gap:6px;align-items:center">
           <span class="badge ${badgeColor}"><span class="badge-dot ${isFinished?'':'pulse'}"></span> ${badgeLabel}</span>
           ${!isFinished ? `<button class="btn btn-sm btn-danger" onclick="cancelJob('${jid}')">Anulează</button>` : ''}
@@ -1397,7 +1419,7 @@ function renderActiveJobs() {
       </div>
       <div class="card-body">
         <div style="display:flex;justify-content:space-between;margin-bottom:6px">
-          <span style="font-size:13px;color:var(--text2)">${d.current_step}</span>
+          <span style="font-size:13px;color:var(--text2)">${escRev(d.current_step)}</span>
           <span style="font-size:13px;font-weight:600">${d.progress}%</span>
         </div>
         <div class="progress" style="height:10px;margin-bottom:12px">
@@ -1457,7 +1479,7 @@ async function checkLibreOffice() {
       el.innerHTML = '<span style="color:var(--amber)">&#10007; LibreOffice nu este instalat. Conversia PDF nu va fi disponibilă.</span>';
     }
   } catch (e) {
-    $('libreOfficeStatus').innerHTML = '<span style="color:var(--red)">Eroare la verificare: ' + e.message + '</span>';
+    $('libreOfficeStatus').innerHTML = '<span style="color:var(--red)">Eroare la verificare: ' + escRev(e.message) + '</span>';
   }
 }
 
@@ -1492,7 +1514,50 @@ function updateNotifStatus() {
 // ============================================================
 // MODELS (live from Ollama)
 // ============================================================
+let availableReviewModels = [];
+let modelsRequestId = 0;
+const reviewModelControls = [
+  ['reviewModelSelect', 'reviewCustomModel'],
+  ['verifyReviewModelSelect', 'verifyReviewCustomModel'],
+  ['rvReviewModelSelect', 'rvReviewCustomModel']
+];
+
+function syncReviewModelControls() {
+  const selected = localStorage.getItem('reviewModel') || '';
+  const custom = localStorage.getItem('reviewCustomModel') || '';
+  for (const [selectId, inputId] of reviewModelControls) {
+    const select = $(selectId), input = $(inputId);
+    if (select) {
+      select.replaceChildren(new Option('Implicit (modelul de traducere)', ''));
+      availableReviewModels.forEach(m => select.add(new Option(`${m.name} (${fmtBytes(m.size)})`, m.name)));
+      // Preserve a saved choice even if Ollama is temporarily disconnected.
+      if (selected && !availableReviewModels.some(m => m.name === selected)) {
+        select.add(new Option(selected + ' (salvat)', selected));
+      }
+      select.value = selected;
+    }
+    if (input && input.value !== custom) input.value = custom;
+  }
+}
+
+function setReviewModelSelection(value) {
+  localStorage.setItem('reviewModel', value);
+  localStorage.setItem('reviewCustomModel', '');
+  syncReviewModelControls();
+}
+
+function setReviewCustomModel(value) {
+  localStorage.setItem('reviewCustomModel', value);
+  syncReviewModelControls();
+}
+
+function getReviewModel() {
+  return (localStorage.getItem('reviewCustomModel') || '').trim()
+    || (localStorage.getItem('reviewModel') || '').trim();
+}
+
 async function refreshModels() {
+  const requestId = ++modelsRequestId;
   const url = $('ollamaUrl').value.trim();
   const badge = $('modelsStatusBadge');
   // If URL is empty, use server default (auto-detected)
@@ -1502,7 +1567,11 @@ async function refreshModels() {
 
   try {
     const resp = await fetch(`/api/models${queryUrl}`);
+    if (!resp.ok) throw new Error('Modelele nu au putut fi încărcate');
     const data = await resp.json();
+    if (requestId !== modelsRequestId) return;
+    availableReviewModels = data.connected ? (data.models || []) : [];
+    syncReviewModelControls();
 
     const sel = $('modelSelect');
     sel.innerHTML = '';
@@ -1517,15 +1586,6 @@ async function refreshModels() {
       // Restore saved model
       const saved = localStorage.getItem('selectedModel');
       if (saved && data.models.some(m => m.name === saved)) sel.value = saved;
-
-      // Populate review model select (keeps the "default" first option)
-      const rsel = $('reviewModelSelect');
-      if (rsel) {
-        rsel.innerHTML = '<option value="">Implicit (același cu modelul de traducere)</option>';
-        data.models.forEach(m => rsel.add(new Option(`${m.name} (${fmtBytes(m.size)})`, m.name)));
-        const savedReview = localStorage.getItem('reviewModel');
-        if (savedReview && data.models.some(m => m.name === savedReview)) rsel.value = savedReview;
-      }
 
       // Render table
       $('settingsModelsList').innerHTML = `<table class="table-simple">
@@ -1547,6 +1607,9 @@ async function refreshModels() {
       $('settingsModelsList').innerHTML = '<div style="color:var(--red);font-size:13px;margin-top:8px">Nu se poate conecta la Ollama. Verificați dacă serverul rulează.</div>';
     }
   } catch (e) {
+    if (requestId !== modelsRequestId) return;
+    availableReviewModels = [];
+    syncReviewModelControls();
     $('modelSelect').innerHTML = '<option value="">Eroare la încărcare</option>';
     badge.className = 'badge red';
     badge.innerHTML = '<span class="badge-dot"></span> Eroare';
@@ -1632,11 +1695,11 @@ function renderJobs(jobsList) {
     const events = live.events || j.events || [];
     const icons = {success:'✓', error:'✗', warning:'⚠', info:'ℹ'};
     const eventsHtml = events.map(ev =>
-      `<div class="event-line"><span class="event-time">${ev.time}</span><span class="event-type ${ev.type}">${icons[ev.type]||'·'}</span><span class="event-msg"><strong>${ev.message}</strong> ${ev.detail ? '— '+ev.detail : ''}</span></div>`
+      `<div class="event-line"><span class="event-time">${ev.time}</span><span class="event-type ${ev.type}">${icons[ev.type]||'·'}</span><span class="event-msg"><strong>${escRev(ev.message)}</strong> ${ev.detail ? '— '+escRev(ev.detail) : ''}</span></div>`
     ).join('');
 
     const currentStepLine = isActive && (live.current_step || j.current_step)
-      ? `<div style="font-size:11px;color:var(--primary);margin-top:4px;font-style:italic">${live.current_step || j.current_step}</div>`
+      ? `<div style="font-size:11px;color:var(--primary);margin-top:4px;font-style:italic">${escRev(live.current_step || j.current_step)}</div>`
       : '';
 
     // LLM review status indicator
@@ -1667,8 +1730,8 @@ function renderJobs(jobsList) {
 
     return `<div class="job-item">
       <div class="job-info">
-        <div class="job-name">${j.filename}${j.kind === 'verify' ? ' <span class="badge purple" style="font-size:10px;vertical-align:middle">verificare</span>' : ''}</div>
-        <div class="job-meta">${j.source_lang} → ${j.target_lang} · ${j.kind === 'verify' ? 'doc extern' : engineLabel} · ${j.client_ip} · ${j.created_at.substring(11,19)}</div>
+        <div class="job-name">${escRev(j.filename)}${j.kind === 'verify' ? ' <span class="badge purple" style="font-size:10px;vertical-align:middle">verificare</span>' : ''}</div>
+        <div class="job-meta">${escRev(j.source_lang)} → ${escRev(j.target_lang)} · ${j.kind === 'verify' ? 'doc extern' : escRev(engineLabel)} · ${j.client_ip} · ${j.created_at.substring(11,19)}</div>
         ${currentStepLine}
       </div>
       <div class="job-stats-center">
@@ -1739,7 +1802,21 @@ async function deleteJob(id) {
 // ============================================================
 // LLM TRANSLATION REVIEW
 // ============================================================
-let reviewState = { jobId: null, poll: null, filter: 'all', selected: new Set(), edits: {} };
+let reviewState = { jobId: null, poll: null, requestId: 0, filter: 'all', selected: new Set(), edits: {} };
+const reviewDrafts = new Map();
+
+function saveReviewDraft() {
+  if (!reviewState.jobId) return;
+  reviewDrafts.set(reviewState.jobId, {
+    selected: new Set(reviewState.selected), edits: {...reviewState.edits},
+    filter: reviewState.filter, selInit: reviewState.selInit
+  });
+}
+
+function stopReviewPolling() {
+  if (reviewState.poll) clearInterval(reviewState.poll);
+  reviewState.poll = null;
+}
 
 function escRev(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
@@ -1812,6 +1889,17 @@ function ensureReviewModal() {
         <button class="rv-close" onclick="closeReview()">×</button>
       </div>
       <div class="rv-body">
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;align-items:end">
+          <div style="flex:1;min-width:200px">
+            <label class="form-label" for="rvReviewModelSelect">Model de verificare</label>
+            <select class="form-control" id="rvReviewModelSelect" onchange="setReviewModelSelection(this.value)"></select>
+          </div>
+          <div style="flex:1;min-width:200px">
+            <label class="form-label" for="rvReviewCustomModel">Sau nume model introdus manual</label>
+            <input class="form-control" id="rvReviewCustomModel" placeholder="ex: qwen2.5:7b" oninput="setReviewCustomModel(this.value)">
+          </div>
+          <button class="btn btn-sm btn-secondary" id="rvRefreshModelsBtn" onclick="refreshModels()">Reîncarcă modele</button>
+        </div>
         <div class="rv-controls">
           <button class="btn btn-sm btn-primary" id="rvStartBtn" onclick="startReviewRun()">Pornește verificarea</button>
           <button class="btn btn-sm btn-danger" id="rvCancelBtn" onclick="cancelReviewRun()" style="display:none">Anulează</button>
@@ -1841,6 +1929,7 @@ function ensureReviewModal() {
       </div>
     </div>`;
   document.body.appendChild(ov);
+  syncReviewModelControls();
   reviewState.filter = 'flagged';
   reviewState.selected = new Set();
   reviewState.edits = {};
@@ -1853,32 +1942,49 @@ function jobFilename(jobId) {
 
 async function openReview(jobId) {
   ensureReviewModal();
+  saveReviewDraft();
+  stopReviewPolling();
+  const requestId = ++reviewState.requestId;
+  const draft = reviewDrafts.get(jobId);
   reviewState.jobId = jobId;
-  reviewState.selected = new Set();
-  reviewState.edits = {};
-  reviewState.selInit = false;
+  reviewState.selected = new Set(draft?.selected || []);
+  reviewState.edits = {...(draft?.edits || {})};
+  reviewState.selInit = draft?.selInit || false;
+  reviewState.filter = draft?.filter || 'flagged';
+  $('rvFilter').value = reviewState.filter;
   $('rvDownloadLink').style.display = 'none';
+  $('rvApplyBtn').textContent = 'Generează document revizuit';
+  $('rvModelInfo').textContent = '';
+  syncReviewModelControls();
   document.getElementById('rvJobName').textContent = jobFilename(jobId);
   document.getElementById('reviewModal').classList.add('open');
-  // Load any existing review state
+  applyReviewData({ status: null, results: [] });
+  // A late response for a different document must never replace this view.
   try {
     const resp = await fetch(`/api/jobs/${jobId}/review`);
+    if (!resp.ok) { const err = await resp.json().catch(()=>({})); throw new Error(err.detail || resp.status); }
     const data = await resp.json();
+    if (requestId !== reviewState.requestId) return;
     applyReviewData(data);
     if (data.status === 'running') startReviewPolling();
   } catch (e) {
-    applyReviewData({ status: null, results: [] });
+    if (requestId !== reviewState.requestId) return;
+    toast('Eroare la încărcarea verificării: ' + e.message, 'error');
   }
 }
 
 function closeReview() {
+  saveReviewDraft();
   document.getElementById('reviewModal')?.classList.remove('open');
-  if (reviewState.poll) { clearInterval(reviewState.poll); reviewState.poll = null; }
+  stopReviewPolling();
+  reviewState.requestId++;
 }
 
 async function startReviewRun() {
   const jobId = reviewState.jobId;
-  const model = (localStorage.getItem('reviewModel') || '').trim();
+  stopReviewPolling();
+  const requestId = ++reviewState.requestId;
+  const model = getReviewModel();
   const ollamaUrl = ($('ollamaUrl') ? $('ollamaUrl').value.trim() : '') || '';
   const numCtx = parseInt(localStorage.getItem('numCtx') || '4096', 10);
   const concurrency = parseInt(($('reviewConcurrency') ? $('reviewConcurrency').value : null) || localStorage.getItem('reviewConcurrency') || '3', 10);
@@ -1886,10 +1992,6 @@ async function startReviewRun() {
   const contextTranslations = $('reviewContextTranslations') ? $('reviewContextTranslations').checked : (localStorage.getItem('reviewContextTranslations') === 'true');
   const keepAlive = localStorage.getItem('keepAlive') || '30m';
   $('rvStartBtn').disabled = true;
-  reviewState.selected = new Set();
-  reviewState.edits = {};
-  reviewState.selInit = false;
-  $('rvDownloadLink').style.display = 'none';
   try {
     const resp = await fetch(`/api/jobs/${jobId}/review`, {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -1897,24 +1999,39 @@ async function startReviewRun() {
     });
     if (!resp.ok) { const err = await resp.json().catch(()=>({})); throw new Error(err.detail || resp.status); }
     const data = await resp.json();
-    $('rvModelInfo').textContent = 'Model: ' + data.model;
+    if (requestId !== reviewState.requestId) return;
+    reviewState.selected = new Set();
+    reviewState.edits = {};
+    reviewState.selInit = false;
+    reviewDrafts.delete(jobId);
+    $('rvDownloadLink').style.display = 'none';
+    applyReviewData({ status: 'running', model: data.model, results: [] });
     toast('Verificare pornită cu ' + data.model, 'info');
     startReviewPolling();
   } catch (e) {
+    if (requestId !== reviewState.requestId) return;
     toast('Eroare la pornirea verificării: ' + e.message, 'error');
     $('rvStartBtn').disabled = false;
   }
 }
 
 function startReviewPolling() {
-  if (reviewState.poll) clearInterval(reviewState.poll);
+  stopReviewPolling();
+  const jobId = reviewState.jobId, requestId = reviewState.requestId;
+  let pending = false;
   const tick = async () => {
+    if (pending || requestId !== reviewState.requestId) return;
+    pending = true;
     try {
-      const resp = await fetch(`/api/jobs/${reviewState.jobId}/review`);
+      const resp = await fetch(`/api/jobs/${jobId}/review`);
+      if (!resp.ok) throw new Error(resp.status);
       const data = await resp.json();
+      if (requestId !== reviewState.requestId) return;
       applyReviewData(data);
-      if (data.status !== 'running') { clearInterval(reviewState.poll); reviewState.poll = null; }
-    } catch (e) {}
+      if (data.status !== 'running') stopReviewPolling();
+    } catch (e) {
+      // A transient network failure can be retried by the next polling tick.
+    } finally { pending = false; }
   };
   reviewState.poll = setInterval(tick, 1000);
   tick();
@@ -1928,13 +2045,16 @@ let _reviewData = { results: [] };
 function applyReviewData(data) {
   _reviewData = data;
   const running = data.status === 'running';
+  $('rvReviewModelSelect').disabled = running;
+  $('rvReviewCustomModel').disabled = running;
+  $('rvRefreshModelsBtn').disabled = running;
   $('rvStartBtn').style.display = running ? 'none' : '';
   $('rvStartBtn').disabled = running;
   $('rvCancelBtn').style.display = running ? '' : 'none';
   $('rvProgWrap').style.display = (running || data.status === 'completed') ? '' : 'none';
   $('rvProgBar').style.width = (data.progress || 0) + '%';
-  if (data.model) $('rvModelInfo').textContent = 'Model: ' + data.model + (running ? ` · ${data.done}/${data.total}` : '');
-  if (data.status === 'completed') $('rvStartBtn').textContent = 'Reia verificarea';
+  $('rvModelInfo').textContent = data.model ? 'Model: ' + data.model + (running ? ` · ${data.done || 0}/${data.total || 0}` : '') : '';
+  $('rvStartBtn').textContent = data.status === 'completed' ? 'Reia verificarea' : 'Pornește verificarea';
 
   // Summary
   const sm = data.summary;
@@ -1947,10 +2067,14 @@ function applyReviewData(data) {
       `<span class="badge red rv-badge-filter${af('major')}" title="Filtrează: majore" onclick="rvSetFilter('major')">${sm.major} majore</span>` +
       (sm.errors ? `<span class="badge rv-badge-filter${af('error')}" style="background:var(--bg);border:1px solid var(--border)" title="Filtrează: erori" onclick="rvSetFilter('error')">${sm.errors} erori</span>` : '') +
       (sm.avg_score ? `<span class="badge blue">Scor mediu ${sm.avg_score}/5</span>` : '');
-  } else if (data.status === 'failed') {
-    sumEl.innerHTML = `<span class="badge red">Eșuat: ${escRev(data.error||'')}</span>`;
   } else {
     sumEl.innerHTML = '';
+  }
+  if (data.status === 'failed') {
+    const failure = document.createElement('span');
+    failure.className = 'badge red';
+    failure.textContent = 'Eșuat: ' + (data.error || 'Verificarea nu a putut fi finalizată.');
+    sumEl.appendChild(failure);
   }
 
   // Default-select all suggestions once the review has FINISHED (partial
@@ -1991,9 +2115,10 @@ function renderReviewList() {
   else if (f === 'ok') results = results.filter(r => r.verdict === 'ok');
   else if (f === 'minor') results = results.filter(r => r.verdict === 'minor');
   else if (f === 'major') results = results.filter(r => r.verdict === 'major');
-  else if (f === 'error') results = results.filter(r => r.verdict === 'error');
+  else if (f === 'error') results = results.filter(r => r.verdict === 'error' || r.verdict === 'unknown');
 
   if (!results.length) {
+    updateApplyBar();
     list.innerHTML = `<div class="rv-empty">${(_reviewData.results||[]).length ? 'Niciun segment în această categorie. 🎉' : (_reviewData.status==='running' ? 'Se analizează...' : 'Niciun rezultat încă.')}</div>`;
     return;
   }
@@ -2024,7 +2149,7 @@ function renderReviewList() {
           <label style="display:flex;align-items:center;gap:5px;text-transform:none;font-weight:600;color:var(--text2);cursor:pointer"><input type="checkbox" class="rv-apply-cb" data-idx="${r.index}" ${reviewState.selected.has(r.index)?'checked':''} onchange="rvToggleOne(${r.index}, this.checked)"> ${lblText}</label>
           <button class="copy-btn" style="margin-left:auto;background:none;border:1px solid var(--border);color:var(--text3);border-radius:4px;font-size:11px;padding:1px 6px;cursor:pointer" onclick="copyToClipboard(this.closest('.rv-card').querySelector('.rv-editable').innerText)">Copiază</button>
         </div>
-        <div class="rv-text rv-editable" contenteditable="true" spellcheck="false" data-idx="${r.index}" oninput="rvSetEdit(${r.index}, this.innerText)">${escRev(applyText)}</div>
+        <div class="rv-text rv-editable" contenteditable="${_reviewData.status === 'running' ? 'false' : 'true'}" spellcheck="false" data-idx="${r.index}" oninput="rvSetEdit(${r.index}, this.innerText)">${escRev(applyText)}</div>
       </div>
     </div>`;
   }).join('');
@@ -2073,6 +2198,7 @@ function rvToggleAll(checked) {
 }
 
 async function applyReview() {
+  const jobId = reviewState.jobId, requestId = reviewState.requestId;
   const indices = [...reviewState.selected];
   if (!indices.length) { toast('Selectează cel puțin o propunere', 'warning'); return; }
   // Send manual edits for any selected segment that has one.
@@ -2081,21 +2207,26 @@ async function applyReview() {
   const btn = $('rvApplyBtn');
   btn.disabled = true; btn.textContent = 'Se generează...';
   try {
-    const resp = await fetch(`/api/jobs/${reviewState.jobId}/review/apply`, {
+    const resp = await fetch(`/api/jobs/${jobId}/review/apply`, {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ indices, edits })
     });
     if (!resp.ok) { const err = await resp.json().catch(()=>({})); throw new Error(err.detail || resp.status); }
     const data = await resp.json();
+    if (requestId !== reviewState.requestId) return;
     toast(`Document revizuit generat (${data.applied} propuneri aplicate)`, 'success');
     const dl = $('rvDownloadLink');
-    dl.href = `/api/jobs/${reviewState.jobId}/review/download`;
+    dl.href = `/api/jobs/${jobId}/review/download`;
     dl.style.display = '';
-    window.open(`/api/jobs/${reviewState.jobId}/review/download`, '_blank');
+    window.open(`/api/jobs/${jobId}/review/download`, '_blank');
   } catch (e) {
+    if (requestId !== reviewState.requestId) return;
     toast('Eroare la generarea documentului: ' + e.message, 'error');
   } finally {
-    btn.disabled = false; btn.textContent = 'Generează document revizuit';
+    if (requestId === reviewState.requestId) {
+      btn.textContent = 'Generează document revizuit';
+      updateApplyBar();
+    }
   }
 }
 
@@ -2261,6 +2392,8 @@ function saveSettings() {
   localStorage.setItem('convertToPdf', $('convertToPdf').checked);
   if ($('originalPrompt')) localStorage.setItem('originalPrompt', $('originalPrompt').checked);
   if ($('reviewModelSelect')) localStorage.setItem('reviewModel', $('reviewModelSelect').value);
+  if ($('reviewCustomModel')) localStorage.setItem('reviewCustomModel', $('reviewCustomModel').value);
+  syncReviewModelControls();
   if ($('reviewConcurrency')) localStorage.setItem('reviewConcurrency', $('reviewConcurrency').value);
   if ($('reviewContextWindow')) localStorage.setItem('reviewContextWindow', $('reviewContextWindow').value);
   if ($('reviewContextTranslations')) localStorage.setItem('reviewContextTranslations', $('reviewContextTranslations').checked);
@@ -2462,7 +2595,7 @@ function selectOCRFile(file) {
   $('ocrSelectedFile').innerHTML = `<div class="file-item">
     <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
     <div class="file-item-info">
-      <div class="file-item-name">${file.name}</div>
+      <div class="file-item-name">${escRev(file.name)}</div>
       <div class="file-item-size">${fmtBytes(file.size)}</div>
     </div>
     <button class="file-item-remove" onclick="clearOCRFile()" title="Elimină">
@@ -2582,7 +2715,7 @@ function selectVerifyFile(which, file) {
   $(target).innerHTML = `<div class="file-item">
     <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
     <div class="file-item-info">
-      <div class="file-item-name">${file.name}</div>
+      <div class="file-item-name">${escRev(file.name)}</div>
       <div class="file-item-size">${fmtBytes(file.size)}</div>
     </div>
     <button class="file-item-remove" onclick="clearVerifyFile('${which}')">✕</button>

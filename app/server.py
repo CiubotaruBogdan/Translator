@@ -463,15 +463,18 @@ def check_libreoffice_available():
 def convert_docx_to_pdf_libreoffice(docx_path: Path, output_dir: Path) -> Path:
     """Convert DOCX to PDF using LibreOffice headless."""
     try:
-        cmd = ['libreoffice', '--headless', '--convert-to', 'pdf',
+        executable = shutil.which('libreoffice') or shutil.which('soffice')
+        if not executable:
+            raise RuntimeError('LibreOffice/soffice nu este instalat.')
+        cmd = [executable, '--headless', '--convert-to', 'pdf',
                '--outdir', str(output_dir), str(docx_path)]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            # Try soffice
-            cmd[0] = 'soffice'
+        fallback = shutil.which('soffice')
+        if result.returncode != 0 and fallback and fallback != executable:
+            cmd[0] = fallback
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         pdf_path = output_dir / (docx_path.stem + '.pdf')
-        if pdf_path.exists():
+        if result.returncode == 0 and pdf_path.exists():
             return pdf_path
         raise Exception(f"PDF not created: {result.stderr}")
     except subprocess.TimeoutExpired:
@@ -557,93 +560,74 @@ def _paragraph_format_groups(para) -> list[dict]:
 
 
 def extract_docx_segments(filepath: Path, tag_inline: bool = True) -> list[dict]:
-    """
-    Extract translatable segments from DOCX while preserving structure info.
-    Each segment = one paragraph or one table cell, with metadata about location.
-    Returns list of dicts: {type, index, text, char_count, ...}
+    """Extract body and table paragraphs with their exact DOCX locations.
 
-    When tag_inline is False, paragraphs are never tagged with ⟦n⟧ markers
-    (used when the "original prompt" mode is on — inline formatting is dropped).
+    Merged cells are visited once, and nested tables retain their cell path.
+    Each paragraph keeps its own runs and inline-formatting markers.
     """
     doc = docx.Document(str(filepath))
     segments = []
-    idx = 0
 
-    # Body paragraphs
-    for pi, para in enumerate(doc.paragraphs):
+    def add_paragraph(para, location):
         full_text = para.text.strip()
-        if full_text:
-            groups = _paragraph_format_groups(para)
-            if tag_inline and len(groups) > 1:
-                # Mixed formatting -> tag each group so we can restore it later
-                seg_text = "".join(f"⟦{i}⟧{g['text']}" for i, g in enumerate(groups))
-                multi_run = True
-            else:
-                seg_text = full_text
-                multi_run = False
-            segments.append({
-                "index": idx, "type": "paragraph", "para_index": pi,
-                "text": seg_text, "char_count": len(full_text),
-                "multi_run": multi_run
-            })
-            idx += 1
+        if not full_text:
+            return
+        groups = _paragraph_format_groups(para)
+        multi_run = tag_inline and len(groups) > 1
+        text = ("".join(f"⟦{i}⟧{g['text']}" for i, g in enumerate(groups))
+                if multi_run else full_text)
+        segments.append({"index": len(segments), "text": text,
+                         "char_count": len(full_text), "multi_run": multi_run,
+                         **location})
 
-    # Table cells
-    for ti, table in enumerate(doc.tables):
+    for pi, para in enumerate(doc.paragraphs):
+        add_paragraph(para, {"type": "paragraph", "para_index": pi})
+
+    def visit_table(table, table_index, table_path):
+        seen_cells = set()
         for ri, row in enumerate(table.rows):
             for ci, cell in enumerate(row.cells):
-                cell_text = cell.text.strip()
-                if cell_text:
-                    segments.append({
-                        "index": idx, "type": "table_cell",
-                        "table_index": ti, "row_index": ri, "cell_index": ci,
-                        "text": cell_text, "char_count": len(cell_text)
+                if cell._tc in seen_cells:
+                    continue
+                seen_cells.add(cell._tc)
+                for pi, para in enumerate(cell.paragraphs):
+                    add_paragraph(para, {
+                        "type": "table_cell", "table_index": table_index,
+                        "table_path": table_path, "row_index": ri,
+                        "cell_index": ci, "cell_para_index": pi,
                     })
-                    idx += 1
+                for nested_index, nested in enumerate(cell.tables):
+                    visit_table(nested, table_index,
+                                table_path + [(ri, ci, nested_index)])
 
+    for ti, table in enumerate(doc.tables):
+        visit_table(table, ti, [])
     return segments
 
 
 def apply_translations_to_docx(filepath: Path, segments: list[dict],
-                                 translations: list[str], output_path: Path):
-    """
-    Open the original DOCX, replace text in each paragraph/cell while
-    preserving formatting (runs, styles, bold, italic, fonts, etc.).
+                               translations: list[str], output_path: Path,
+                               allow_empty: bool = False):
+    """Replace body/table paragraph text without rebuilding document structure.
+
+    None means leave the segment untouched. Empty strings are accepted only for
+    explicit review edits; a missing machine translation must not erase text.
     """
     doc = docx.Document(str(filepath))
-
-    # Build lookup: para_index -> (translated text, multi_run flag)
-    para_translations = {}
-    cell_translations = {}
-
     for seg, trans in zip(segments, translations):
-        if not trans or trans.startswith("[TRANSLATION ERROR"):
+        if trans is None or (not trans and not allow_empty) or trans.startswith("[TRANSLATION ERROR"):
             continue
         if seg["type"] == "paragraph":
-            para_translations[seg["para_index"]] = (trans, seg.get("multi_run", False))
+            para = doc.paragraphs[seg["para_index"]]
         elif seg["type"] == "table_cell":
-            key = (seg["table_index"], seg["row_index"], seg["cell_index"])
-            cell_translations[key] = trans
-
-    # Replace paragraph text preserving runs (and inline formatting when tagged)
-    for pi, para in enumerate(doc.paragraphs):
-        if pi in para_translations:
-            trans, multi_run = para_translations[pi]
-            _apply_paragraph_translation(para, trans, multi_run)
-
-    # Replace table cell text preserving runs
-    for ti, table in enumerate(doc.tables):
-        for ri, row in enumerate(table.rows):
-            for ci, cell in enumerate(row.cells):
-                key = (ti, ri, ci)
-                if key in cell_translations:
-                    # Cell can have multiple paragraphs; put all text in first, clear rest
-                    if cell.paragraphs:
-                        _replace_paragraph_text(cell.paragraphs[0], cell_translations[key])
-                        # Clear additional paragraphs in cell
-                        for extra_para in cell.paragraphs[1:]:
-                            _clear_paragraph(extra_para)
-
+            table = doc.tables[seg["table_index"]]
+            for row_index, cell_index, nested_index in seg.get("table_path", []):
+                table = table.rows[row_index].cells[cell_index].tables[nested_index]
+            cell = table.rows[seg["row_index"]].cells[seg["cell_index"]]
+            para = cell.paragraphs[seg.get("cell_para_index", 0)]
+        else:
+            continue
+        _apply_paragraph_translation(para, trans, seg.get("multi_run", False))
     doc.save(str(output_path))
 
 
@@ -788,26 +772,17 @@ def extract_text_from_txt(filepath: Path) -> list[str]:
             paragraphs.append(cleaned)
     return paragraphs
 
-def extract_review_segments(filepath: Path, paragraphs_only: bool = False):
+def extract_review_segments(filepath: Path):
     """Segment an already-finished document for review.
 
     Returns ``(segment_texts, docx_segments)`` where ``docx_segments`` is the
     structural metadata (only for DOCX, used to rebuild a revised document) or
     ``None`` for plain-text/PDF sources. DOCX paragraphs keep their inline
     ⟦n⟧ markers so applied corrections can preserve bold/italic.
-
-    When ``paragraphs_only`` is True, table cells are excluded from extraction.
-    This is used for the external verify flow where tables should remain
-    untouched from the original document.
     """
     ext = filepath.suffix.lower()
     if ext == '.docx':
         segs = extract_docx_segments(filepath, tag_inline=True)
-        if paragraphs_only:
-            segs = [s for s in segs if s["type"] == "paragraph"]
-            # Re-index after filtering
-            for i, s in enumerate(segs):
-                s["index"] = i
         return [s['text'] for s in segs], segs
     if ext == '.pdf':
         return extract_text_from_pdf(filepath), None
@@ -1357,6 +1332,9 @@ async def run_pipeline(job: TranslationJob):
                 emit(job)
                 return
 
+        if job.total_chunks and job.failed_chunks == job.total_chunks:
+            raise RuntimeError("Traducerea a eșuat pentru toate segmentele. Verifică motorul și modelul selectat; detaliile sunt în evenimentele jobului.")
+
         # --- ASSEMBLE ---
         job.status = JobStatus.ASSEMBLING
         job.current_step = "Assembling translated document..."
@@ -1563,10 +1541,25 @@ def _review_summary(results_list, partial=False):
             "avg_score": avg_score, "total": len(results_list), "partial": partial}
 
 
+def _reset_review(job: TranslationJob, model: str):
+    """Reserve the job immediately and clear results from an earlier review."""
+    job.review_status = "running"
+    job.review_model = model
+    job.review_error = None
+    job.review_cancel = False
+    job.review_results = []
+    job.review_summary = None
+    job.review_done = 0
+    job.review_total = 0
+    job.review_progress = 0.0
+    job.revised_output_file = None
+    job.review_export_file = None
+
+
 async def run_review(job: TranslationJob, model: str, url: str,
                      num_ctx: int = DEFAULT_NUM_CTX, concurrency: int = DEFAULT_CONCURRENCY,
                      keep_alive: str = DEFAULT_KEEP_ALIVE, context_window: int = 1,
-                     context_translations: bool = False):
+                     context_translations: bool = False, _prepared: bool = False):
     """Review every translated segment of a completed job with a general LLM.
 
     ``context_window`` is how many neighbouring source segments (each side) are
@@ -1576,13 +1569,8 @@ async def run_review(job: TranslationJob, model: str, url: str,
     included alongside the source context.
     """
     try:
-        job.review_status = "running"
-        job.review_model = model
-        job.review_error = None
-        job.review_cancel = False
-        job.review_results = []
-        job.review_done = 0
-        job.review_progress = 0.0
+        if not _prepared:
+            _reset_review(job, model)
 
         # Build aligned (index, source, translation) pairs, skipping empties/errors.
         # For segments with inline formatting markers (⟦n⟧), the reviewer is shown
@@ -1704,6 +1692,10 @@ async def run_review(job: TranslationJob, model: str, url: str,
         job.review_results = [results[k] for k in sorted(results.keys())]
         job.review_summary = _review_summary(job.review_results)
         sm = job.review_summary
+        if sm["total"] and sm["errors"] == sm["total"]:
+            first_error = next((issue for result in job.review_results
+                                for issue in result.get("issues", []) if issue), "")
+            raise RuntimeError(f"Verificarea a eșuat pentru toate segmentele. {first_error}")
         job.review_status = "completed"
         job.review_progress = 100.0
         job.add_event("success", "Verificare finalizată",
@@ -1717,129 +1709,36 @@ async def run_review(job: TranslationJob, model: str, url: str,
         emit(job)
 
 
-def _inject_markers_proportional(orig_tagged: str, new_text: str) -> str:
-    """
-    Given the original segment text WITH ⟦n⟧ markers and a plain (untagged)
-    new translation text, inject the markers into the new text at proportional
-    positions so that apply_translations_to_docx can distribute the text across
-    the original formatting runs.
-
-    Example:
-      orig_tagged = "⟦0⟧Normal text ⟦1⟧bold part⟦2⟧ and end"
-      new_text    = "Translated normal bold translated and end translated"
-      -> returns   "⟦0⟧Translated normal ⟦1⟧bold translated⟦2⟧ and end translated"
-      (markers placed at proportional character positions)
-    """
-    # If new_text already has markers, return as-is
-    if INLINE_MARKER_RE.search(new_text):
-        return new_text
-
-    # Extract marker positions from original (as fraction of total text length)
-    # Find all markers and their positions in the clean text
-    markers = list(INLINE_MARKER_RE.finditer(orig_tagged))
-    if not markers:
-        return new_text
-
-    # Get the clean original text (without markers) and compute proportional positions
-    clean_orig = INLINE_MARKER_RE.sub("", orig_tagged)
-    orig_len = len(clean_orig) if clean_orig else 1
-    new_len = len(new_text)
-
-    # Calculate where each marker sits in the clean original text
-    # (how many clean chars precede it)
-    marker_positions = []  # list of (marker_string, char_offset_in_clean)
-    clean_offset = 0
-    i = 0
-    orig_str = orig_tagged
-    while i < len(orig_str):
-        m = INLINE_MARKER_RE.match(orig_str, i)
-        if m:
-            marker_positions.append((m.group(), clean_offset))
-            i = m.end()
-        else:
-            clean_offset += 1
-            i += 1
-
-    # Now place markers in new_text at proportional positions
-    # Sort by position (should already be sorted)
-    result_parts = []
-    last_cut = 0
-    for marker_str, orig_char_pos in marker_positions:
-        # Proportional position in new text
-        if orig_len > 0:
-            new_pos = int(round(orig_char_pos * new_len / orig_len))
-        else:
-            new_pos = 0
-        new_pos = max(last_cut, min(new_pos, new_len))
-        result_parts.append(new_text[last_cut:new_pos])
-        result_parts.append(marker_str)
-        last_cut = new_pos
-    result_parts.append(new_text[last_cut:])
-    return "".join(result_parts)
-
-
 def build_revised_document(job: TranslationJob, revised_translations: list[str]):
+    """Apply revised body/table text to the document whose structure it describes.
+
+    External verification edits the uploaded translation, never the source-language
+    original. Untouched/unmatched translated paragraphs remain intact. Ordinary
+    translation jobs rebuild from their original DOCX with all translated segments.
     """
-    Build a new document from the (possibly improved) translations.
-
-    IMPORTANT: The revised document is a FULL COPY of the ORIGINAL document
-    (preserving tables, images, headers, footers, styles, fonts, etc.).
-    Only the text paragraphs that were verified/translated are replaced.
-    Tables and images remain exactly as in the original.
-
-    Returns (output_path, download_name).
-    """
-    # Determine the original file path and its DOCX segments
-    orig_filename = job.original_filename or job.filename
-    orig_docx_segments = job.original_docx_segments or []
-
-    # For verify jobs, original is stored as {job_id}_orig_{filename}
-    # For translate jobs, original is stored as {job_id}_{filename}
     if job.kind == "verify":
-        original_path = UPLOAD_DIR / f"{job.job_id}_orig_{orig_filename}"
+        orig_filename = job.filename
+        orig_docx_segments = job.docx_segments
     else:
-        original_path = UPLOAD_DIR / f"{job.job_id}_{orig_filename}"
-
+        orig_filename = job.original_filename or job.filename
+        orig_docx_segments = job.original_docx_segments or job.docx_segments
+    original_path = UPLOAD_DIR / f"{job.job_id}_{orig_filename}"
     orig_ext = Path(orig_filename).suffix.lower()
     stem = Path(orig_filename).stem
 
-    # Format-preserving path: original DOCX still available with segment metadata
     if orig_ext == '.docx' and orig_docx_segments and original_path.exists():
         out_name = f"{stem}_{job.target_lang}_revizuit_review.docx"
         out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
-
-        # First, make a byte-level copy of the original to preserve EVERYTHING
-        # (images, shapes, headers, footers, embedded objects, etc.)
-        shutil.copy2(str(original_path), str(out_path))
-
-        # Now open the copy and ONLY replace the paragraph text segments.
-        # Tables, images, and other elements remain untouched.
-        # Filter to only paragraph segments (skip table_cell for verify jobs
-        # since tables should remain as in original)
-        para_segments = [s for s in orig_docx_segments if s["type"] == "paragraph"]
-
-        # Build the translation list aligned with paragraph segments only
-        para_translations = []
+        translations = []
         for seg in orig_docx_segments:
             idx = seg["index"]
-            if idx < len(revised_translations):
-                rev_text = revised_translations[idx]
-            else:
-                rev_text = ""
-            if seg["type"] == "paragraph":
-                # Inject markers if the original had multi-run formatting
-                if seg.get("multi_run") and rev_text:
-                    rev_text = _inject_markers_proportional(seg["text"], rev_text)
-                para_translations.append((seg["para_index"], rev_text, seg.get("multi_run", False)))
-
-        # Open the copied document and replace only paragraph text
-        doc = docx.Document(str(out_path))
-        for para_index, trans_text, multi_run in para_translations:
-            if not trans_text or trans_text.startswith("[TRANSLATION ERROR"):
-                continue
-            if para_index < len(doc.paragraphs):
-                _apply_paragraph_translation(doc.paragraphs[para_index], trans_text, multi_run)
-        doc.save(str(out_path))
+            text = revised_translations[idx] if idx < len(revised_translations) else None
+            if (job.kind == "verify" and idx < len(job.translated_chunks)
+                    and text == job.translated_chunks[idx]):
+                text = None  # Keep the untouched translated paragraph XML intact.
+            translations.append(text)
+        apply_translations_to_docx(original_path, orig_docx_segments, translations,
+                                   out_path, allow_empty=True)
         return out_path, out_name
 
     # Plain text source
@@ -2066,10 +1965,9 @@ async def api_verify_documents(
     trans_path.write_bytes(trans_bytes)
 
     try:
-        # Extract only paragraphs (skip table cells) — tables and images
-        # remain untouched from the original in the revised document.
-        src_texts, orig_docx = extract_review_segments(orig_path, paragraphs_only=True)
-        tgt_texts, tgt_docx = extract_review_segments(trans_path, paragraphs_only=True)
+        # Include table paragraphs, including merged and nested table cells.
+        src_texts, orig_docx = extract_review_segments(orig_path)
+        tgt_texts, tgt_docx = extract_review_segments(trans_path)
     except Exception as e:
         raise HTTPException(400, f"Nu am putut citi documentele: {e}")
 
@@ -2080,9 +1978,8 @@ async def api_verify_documents(
     mismatch = orig_count != trans_count
     n = min(orig_count, trans_count)
     src_texts = src_texts[:n]
-    tgt_texts = tgt_texts[:n]
-    if tgt_docx is not None:
-        tgt_docx = tgt_docx[:n]
+    # Retain unmatched translated content for reconstruction. run_review skips
+    # target segments without an aligned source, but export must not drop them.
     if orig_docx is not None:
         orig_docx = orig_docx[:n]
 
@@ -2143,10 +2040,12 @@ async def api_review(job_id: str, req: ReviewRequest):
     num_ctx = max(512, min(req.num_ctx, 32768))
     concurrency = max(1, min(req.concurrency, 10))
     context_window = max(0, min(req.context_window, 5))
+    _reset_review(job, model)
     asyncio.create_task(run_review(job, model, url, num_ctx=num_ctx,
                                    concurrency=concurrency, keep_alive=req.keep_alive,
                                    context_window=context_window,
-                                   context_translations=bool(req.context_translations)))
+                                   context_translations=bool(req.context_translations),
+                                   _prepared=True))
     return {"ok": True, "model": model, "total": len(job.source_segments)}
 
 
@@ -2181,7 +2080,7 @@ async def api_review_cancel(job_id: str):
 class ReviewApplyRequest(BaseModel):
     indices: list[int] = []     # segment indices whose suggestion to apply
     apply_all: bool = False     # apply every suggestion that exists
-    edits: dict[str, str] = {}  # segment index -> manually edited text (overrides suggestion)
+    edits: dict[int, str] = {}  # segment index -> manually edited text (overrides suggestion)
 
 
 @app.post("/api/jobs/{job_id}/review/apply")
@@ -2200,11 +2099,13 @@ async def api_review_apply(job_id: str, req: ReviewApplyRequest):
     # Manual edits override the suggestion for that segment. Note: manually
     # edited text carries no inline ⟦n⟧ markers, so DOCX inline formatting on
     # an edited segment is not reapplied.
-    edits = {int(k): v for k, v in (req.edits or {}).items()}
+    edits = req.edits or {}
     if req.apply_all:
         chosen = set(suggestions.keys()) | set(edits.keys())
     else:
         chosen = {i for i in req.indices if i in suggestions or i in edits}
+    if any(i < 0 or i >= len(job.translated_chunks) for i in chosen):
+        raise HTTPException(400, "Indice de segment invalid.")
     if not chosen:
         raise HTTPException(400, "Nicio propunere de aplicat.")
 

@@ -91,7 +91,7 @@ Pentru paragrafele cu formatare mixtă (ex. un cuvânt **îngroșat** în mijloc
 
 ### Verificare traduceri cu un al doilea LLM (review)
 
-Pe lângă modelul de traducere, aplicația poate rula o **verificare de calitate** cu un model LLM generalist (configurabil în Setări → *Model de verificare*), tot prin Ollama. Pentru fiecare job finalizat, butonul **„🔍 Verifică"** (pe pagina *Job-uri* și în panoul de finalizare al unei traduceri) compară fiecare segment *original ↔ traducere* și returnează un verdict structurat:
+Pe lângă modelul de traducere, aplicația poate rula o **verificare de calitate** cu un model LLM generalist (configurabil în Setări → *Model de verificare*), tot prin Ollama. Modelul poate fi ales direct în pagina **Verifică traducere** sau în fereastra de verificare: din lista modelelor detectate ori prin introducerea manuală a numelui. Alegerea se aplică imediat; selectarea unui model din listă golește numele manual. Pentru fiecare job finalizat, butonul **„🔍 Verifică"** (pe pagina *Job-uri* și în panoul de finalizare al unei traduceri) compară fiecare segment *original ↔ traducere* și returnează un verdict structurat:
 
 - **verdict**: `ok` / `minor` / `major`
 - **scor**: 1–5
@@ -110,9 +110,10 @@ Rezultatele apar într-un panou cu sumar (câte segmente OK / minore / majore, s
 
 ### Verificarea unei traduceri externe (tab „Verifică traducere")
 
-Pe lângă verificarea unui job propriu, există un tab dedicat **„Verifică traducere"** pentru documente traduse **în afara aplicației**. Încarci documentul **original** și documentul **tradus** (DOCX, PDF, TXT, MD), alegi limbile, apoi apeși **„Verifică traducerea"**. Aplicația segmentează ambele documente, **aliniază segmentele pe poziție** (paragraf cu paragraf) și deschide direct fereastra de verificare descrisă mai sus — cu tot ce ține de ea: verdicte/scor, editare manuală, filtrare, copiere, context vecin și generarea documentului revizuit cu sufix `_review`.
+Pe lângă verificarea unui job propriu, există un tab dedicat **„Verifică traducere"** pentru documente traduse **în afara aplicației**. Încarci documentul **original** și documentul **tradus** (DOCX, PDF, TXT, MD), alegi limbile, apoi apeși **„Verifică traducerea"**. Aplicația segmentează ambele documente, **aliniază segmentele pe poziție** (paragraf cu paragraf, inclusiv paragrafele din celulele tabelelor) și deschide direct fereastra de verificare descrisă mai sus — cu tot ce ține de ea: verdicte/scor, editare manuală, filtrare, copiere, context vecin și generarea documentului revizuit cu sufix `_review`.
 
 - **Aliniere**: dacă cele două documente au un număr diferit de segmente, se verifică partea comună și se afișează un **avertisment**. Pentru rezultate corecte, documentele ar trebui să aibă aceeași structură (același număr de paragrafe) — cazul tipic fiind un original și traducerea lui produsă cu aceeași aplicație.
+- **Tabele și editări**: verificarea include celulele, paragrafele multiple dintr-o celulă și tabelele imbricate, fără dublarea celulelor îmbinate. Modificările selectate, inclusiv editările manuale și ștergerea textului, se aplică în documentul descărcat. La verificarea unui document extern, baza este documentul **tradus** încărcat, astfel încât conținutul neselectat și segmentele suplimentare rămân intacte.
 - **Reutilizare**: intern se creează un „job de verificare" (`kind = "verify"`), marcat `completed`, care folosește exact aceleași endpoint-uri de review/apply/download. Apare și în lista **„Job-uri"**, marcat cu un badge **„verificare"**. Pentru DOCX, documentul revizuit se reconstruiește peste cel tradus, păstrând formatarea (inclusiv cea inline).
 - **API**: `POST /api/verify-documents` (form-data: `original`, `translated`, `source_lang`, `target_lang`) → întoarce `job_id`, numărul de segmente aliniate și un flag `mismatch`. Verificarea propriu-zisă se pornește apoi prin endpoint-urile standard `…/review`.
 
@@ -129,3 +130,13 @@ Pagina **`/prompts.html`** expune istoricul fiecărei cereri trimise către moto
 
 Pentru instrucțiuni detaliate de instalare și utilizare, consultați **[TUTORIAL_DOCKER.md](TUTORIAL_DOCKER.md)**.
 
+
+## Verificări de regresie
+
+Cu dependențele Python din `Containerfile` instalate, rulează din rădăcina repository-ului:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Testele verifică aplicarea editărilor și sugestiilor în tabele DOCX, păstrarea conținutului neselectat, validarea cererilor de revizuire și raportarea eșecurilor motoarelor. Răspunsurile motoarelor sunt simulate în aceste teste; calitatea traducerilor și disponibilitatea unui model real trebuie verificate separat cu serviciul Ollama sau LibreTranslate configurat.
