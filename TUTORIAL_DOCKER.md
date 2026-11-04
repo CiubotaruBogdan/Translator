@@ -32,10 +32,11 @@ Pe stația online, rulați scriptul `builder.bat`.
 2.  Dublu-click pe **`builder.bat`**.
 3.  Selectați opțiunea **3. Construiește + Exportă**.
 
-Acest script va executa automat doi pași:
+Acest script va executa automat trei pași:
 
 1.  **Construirea imaginii `traducator-offline`**: Descarcă toate componentele necesare (Python, LibreTranslate, modele de limbă etc.) și le asamblează în imaginea containerului. Poate dura 5-20 de minute.
-2.  **Exportarea imaginii într-un fișier `.tar`**: Salvează imaginea completă într-un singur fișier pentru transferul offline.
+2.  **Verificare offline**: Sunt executate traduceri pentru perechile instalate într-un container fără rețea. Lipsa unui model sau cache oprește exportul.
+3.  **Exportarea imaginii într-un fișier `.tar`**: Salvează imaginea completă într-un singur fișier pentru transferul offline.
 
 La final, veți avea un fișier numit `traducator-offline.tar` în același folder.
 
@@ -45,6 +46,7 @@ Copiați următoarele fișiere pe un stick USB sau hard disk extern pentru a le 
 
 -   `traducator-offline.tar` (fișierul mare, ~2-3 GB)
 -   `traducator_manager.bat` (scriptul de management pentru stația offline)
+-   `configure_access.ps1` (configurarea locală a parolei)
 -   `TUTORIAL_DOCKER.md` (acest ghid)
 
 > **Notă:** Fișierele vechi precum `start.bat`, `stop.bat` sau `ollama_translator_activator.bat` **nu mai sunt necesare**.
@@ -67,11 +69,12 @@ Creați un folder permanent pe stația offline (ex: `C:\Traducator`) și copiaț
 
 -   `traducator-offline.tar`
 -   `traducator_manager.bat`
+-   `configure_access.ps1`
 -   `TUTORIAL_DOCKER.md`
 
 ### 2.3 Rulare Manager
 
-Dublu-click pe **`traducator_manager.bat`**. Acesta este singurul script de care aveți nevoie pentru a gestiona aplicația.
+Dublu-click pe **`traducator_manager.bat`**. Acesta este punctul de intrare pentru gestionarea aplicației; păstrați `configure_access.ps1` alături de el.
 
 ### 2.4 Încărcare Imagine
 
@@ -100,17 +103,22 @@ Toate operațiunile se fac din meniul interactiv `traducator_manager.bat`.
 2.  Puteți lăsa portul și URL-ul Ollama la valorile implicite (apăsați Enter).
     -   **Port web**: Portul pe care va rula interfața web (implicit: 80).
     -   **Ollama URL**: Lăsați `auto` pentru detecție automată (recomandat).
-3.  Scriptul va porni containerul. La final, vă va întreba dacă doriți să deschideți interfața web în browser.
+3.  La prima pornire, helper-ul solicită mascat o **parolă comună de minimum 12 caractere**, cu confirmare. Utilizatorul din browser este **`translator`**. Parola este salvată local în `translator-password.txt` cu acces restrâns și introdusă în secretul Podman `traducator-password`. Nu distribuiți fișierul parolei pe stick sau împreună cu arhiva aplicației.
+4.  Containerul folosește volumele persistente `traducator-uploads` și `traducator-outputs`. La următoarele porniri managerul reutilizează containerul și configurația; nu șterge documentele. Fișierele inactive sunt supuse retenției automate de 24 de ore, configurabilă prin `FILE_RETENTION_HOURS`.
+5.  Managerul așteaptă disponibilitatea motorului selectat prin `/healthz`. Dacă inițializarea eșuează, consultați logurile; aplicația nu este declarată pregătită doar pentru că portul web răspunde.
+6.  La final, puteți deschide browserul. Pentru containere vechi sau schimbarea imaginii folosiți procedura de migrare de mai jos.
 
 ### 3.2 Accesare Interfață
 
 -   **Local:** http://localhost:80 (sau portul configurat)
 -   **Din rețea:** http://NUME-COMPUTER:80 (sau adresa IP a stației)
 
+Browserul solicită utilizatorul `translator` și parola comună. Toți utilizatorii autentificați au acces la același spațiu de documente. Pentru o rețea în care traficul poate fi interceptat, folosiți un reverse proxy HTTPS: HTTP Basic nu criptează parola sau documentele. API-ul și conexiunile WebSocket/SSE sunt protejate; numai starea minimă `/healthz` este publică.
+
 ### 3.3 Meniu Manager
 
 -   **Opțiunea 3 (Verifica serviciile)**: Arată starea containerului și conectivitatea la LibreTranslate și Ollama.
--   **Opțiunea 4 (Opreste serviciile)**: Oprește și, opțional, șterge containerul.
+-   **Opțiunea 4 (Opreste serviciile)**: Oprește containerul fără a șterge datele din volume.
 -   **Opțiunea 5 (Loguri in timp real)**: Afișează logurile live ale containerului, util pentru depanare.
 -   **Opțiunea 9 (Diagnosticare retea)**: Rulează o serie de teste de conectivitate între container și gazdă, esențial pentru a rezolva problemele cu Ollama.
 
@@ -122,7 +130,46 @@ Toate operațiunile se fac din meniul interactiv `traducator_manager.bat`.
 
 ---
 
+## Actualizare și migrare cu păstrarea documentelor
+
+Încărcarea unei imagini noi nu înlocuiește imaginea unui container deja creat. Managerul refuză reutilizarea automată a containerelor vechi fără eticheta/configurația de securitate nouă. Acesta este un refuz preventiv; containerul vechi și fișierele lui sunt păstrate.
+
+Pentru **migrarea unui container vechi**, executați în PowerShell din directorul aplicației, verificând succesul fiecărei comenzi înainte de a continua:
+
+```powershell
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$backupDir = Join-Path (Get-Location) "backup-$stamp"
+New-Item -ItemType Directory -Path "$backupDir/uploads", "$backupDir/outputs"
+podman stop traducator-offline
+podman cp traducator-offline:/app/uploads/. "$backupDir/uploads"
+podman cp traducator-offline:/app/outputs/. "$backupDir/outputs"
+# Verificati ca fisierele dorite exista in backup inainte de redenumire.
+podman rename traducator-offline "traducator-offline-backup-$stamp"
+```
+
+Păstrați acest backup privat. Nu îl includeți în pachetul distribuit. Porniți noua imagine prin manager, configurați parola, apoi opriți noul container înainte de a copia documentele:
+
+```powershell
+podman stop traducator-offline
+podman cp "$backupDir/uploads/." traducator-offline:/app/uploads/
+podman cp "$backupDir/outputs/." traducator-offline:/app/outputs/
+podman start traducator-offline
+```
+
+Dacă volumele `traducator-uploads`/`traducator-outputs` conțin deja alte fișiere, faceți și backupul acestora și comparați numele înainte de copiere; nu suprascrieți rezultate existente. Documentele vechi pot fi descărcate din **Loguri & Sistem** după autentificare. Joburile și istoricul prompturilor din procesul vechi nu se restaurează, fiind stocate în memorie. Politica de retenție continuă să se aplice fișierelor copiate.
+
+Pentru **upgrade între versiuni care folosesc deja volumele persistente**, faceți backup, opriți și redenumiți containerul curent, apoi creați noul container prin manager. Volumele și secretul existente sunt reutilizate; copierea fișierelor nu este necesară. Păstrați containerul anterior oprit pentru verificare/rollback și nu porniți simultan două containere care scriu în aceleași volume.
+
+Pentru schimbarea parolei, recreați secretul și containerul într-o fereastră de mentenanță, după backup, folosind noul fișier protejat. Modificarea doar a fișierului local nu actualizează un secret deja importat în Podman. Nu eliminați volumele de documente la rotația parolei.
+
 ## Depanare Avansată
+
+### Problema: acces refuzat sau HTTP 503
+
+- Pentru HTTP 401, verificați utilizatorul `translator` și parola comună.
+- Dacă accesul nu este configurat, verificați montarea secretului și `TRANSLATOR_PASSWORD_FILE` în configurația containerului. Parola nu este afișată în loguri.
+- `/healthz` întoarce 503 dacă accesul sau motorul selectat nu sunt pregătite. Opțiunile 3 și 5 din manager ajută la diagnostic.
+- Dacă o adresă de motor este respinsă, administratorul trebuie să o configureze la pornire în `TRANSLATOR_ALLOWED_ENGINE_URLS` sau ca adresă implicită. Sunt acceptate numai origini HTTP(S), fără cale, query, fragment sau credențiale.
 
 ### Problema: Ollama apare ca „Deconectat"
 

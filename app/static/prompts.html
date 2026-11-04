@@ -96,6 +96,7 @@
   </div>
 </div>
 
+<script src="/static/common.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 
@@ -105,18 +106,23 @@ function escHtml(s) {
   return d.innerHTML;
 }
 
-function toggleEx(el) { el.classList.toggle('open'); }
+const expandedExchanges = new Set();
+let promptsRequestId = 0;
 
-function copyText(btn, encoded) {
-  const text = decodeURIComponent(encoded);
-  navigator.clipboard.writeText(text).then(() => {
-    const old = btn.textContent;
+async function copyText(btn, text) {
+  const old = btn.textContent;
+  try {
+    await copyPlainText(text);
     btn.textContent = 'Copiat!';
-    setTimeout(() => btn.textContent = old, 1200);
-  });
+  } catch (e) {
+    btn.textContent = 'Copiere eșuată';
+    btn.title = e.message;
+  }
+  setTimeout(() => { btn.textContent = old; }, 1200);
 }
 
 async function loadPrompts() {
+  const requestId = ++promptsRequestId;
   try {
     const job = $('filterJob').value.trim();
     const engine = $('filterEngine').value;
@@ -126,7 +132,11 @@ async function loadPrompts() {
     if (engine) params.set('engine', engine);
     const resp = await fetch('/api/prompts?' + params.toString());
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
+    if (requestId !== promptsRequestId) return;
     const list = $('list');
+    const scrollPositions = new Map([...list.querySelectorAll('.ex')].map(el =>
+      [el.dataset.exchangeId, [...el.querySelectorAll('pre')].map(pre => pre.scrollTop)]));
     $('countLabel').textContent = data.prompts.length + ' / ' + data.total + ' intrari';
 
     if (!data.prompts.length) {
@@ -136,16 +146,14 @@ async function loadPrompts() {
 
     list.innerHTML = data.prompts.map(p => {
       const engClass = p.engine === 'libretranslate' ? 'libretranslate' : 'ollama';
-      const errBadge = p.error ? `<span class="badge err">EROARE</span>` : '';
-      const retry = p.attempts > 1 ? `<span class="ex-meta">&#8635; ${p.attempts} incercari</span>` : '';
-      const promptEnc = encodeURIComponent(p.prompt || '');
-      const respEnc = encodeURIComponent(p.response || '');
+      const errBadge = p.error ? '<span class="badge err">EROARE</span>' : '';
+      const retry = p.attempts > 1 ? `<span class="ex-meta">&#8635; ${escHtml(p.attempts)} incercari</span>` : '';
       const responseBlock = p.error
         ? `<pre class="io" style="color:var(--red)">${escHtml(p.error)}</pre>`
         : `<pre class="io">${escHtml(p.response)}</pre>`;
       return `
       <div class="ex">
-        <div class="ex-head" onclick="toggleEx(this.parentNode)">
+        <div class="ex-head" role="button" tabindex="0" aria-expanded="false">
           <span class="arrow">&#9654;</span>
           <span class="badge ${engClass}">${escHtml(p.engine)}</span>
           <span class="badge kind">${escHtml(p.kind)}</span>
@@ -154,20 +162,20 @@ async function loadPrompts() {
           <span class="ex-meta">job: ${escHtml(p.job_id)}</span>
           ${errBadge}${retry}
           <span class="ex-spacer"></span>
-          <span class="ex-meta">${p.prompt_chars}&rarr;${p.response_chars} ch &middot; ${p.duration_ms} ms</span>
+          <span class="ex-meta">${escHtml(p.prompt_chars)}&rarr;${escHtml(p.response_chars)} ch &middot; ${escHtml(p.duration_ms)} ms</span>
           <span class="ex-time">${escHtml(p.time)}</span>
         </div>
         <div class="ex-body">
           <div class="io-grid">
             <div>
               <div class="io-label">Prompt trimis
-                <button class="copy-btn" onclick="event.stopPropagation();copyText(this,'${promptEnc}')">Copiaza</button>
+                <button class="copy-btn">Copiaza</button>
               </div>
               <pre class="io">${escHtml(p.prompt)}</pre>
             </div>
             <div>
               <div class="io-label">Raspuns primit
-                <button class="copy-btn" onclick="event.stopPropagation();copyText(this,'${respEnc}')">Copiaza</button>
+                <button class="copy-btn">Copiaza</button>
               </div>
               ${responseBlock}
             </div>
@@ -175,7 +183,31 @@ async function loadPrompts() {
         </div>
       </div>`;
     }).join('');
+    // Bind data as values, never as executable JavaScript or HTML attributes.
+    [...list.querySelectorAll('.ex')].forEach((el, i) => {
+      const entry = data.prompts[i], key = String(entry.id);
+      el.dataset.exchangeId = key;
+      const head = el.querySelector('.ex-head');
+      const show = expandedExchanges.has(key);
+      el.classList.toggle('open', show);
+      head.setAttribute('aria-expanded', String(show));
+      const toggle = () => {
+        const open = el.classList.toggle('open');
+        if (open) expandedExchanges.add(key); else expandedExchanges.delete(key);
+        head.setAttribute('aria-expanded', String(open));
+      };
+      head.addEventListener('click', toggle);
+      head.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); }
+      });
+      const buttons = el.querySelectorAll('.copy-btn');
+      buttons[0].addEventListener('click', () => copyText(buttons[0], entry.prompt || ''));
+      buttons[1].addEventListener('click', () => copyText(buttons[1], entry.response || ''));
+      const positions = scrollPositions.get(key) || [];
+      el.querySelectorAll('pre').forEach((pre, index) => { pre.scrollTop = positions[index] || 0; });
+    });
   } catch (e) {
+    if (requestId !== promptsRequestId) return;
     $('list').innerHTML = '<div class="empty" style="color:var(--red)">Eroare: ' + escHtml(e.message) + '</div>';
   }
 }
@@ -185,6 +217,8 @@ async function clearPrompts() {
   try {
     const resp = await fetch('/api/prompts', { method: 'DELETE' });
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
+    expandedExchanges.clear();
     alert(data.cleared + ' intrari sterse');
     loadPrompts();
   } catch (e) {

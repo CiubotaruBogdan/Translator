@@ -1,24 +1,15 @@
+"""Install required Argos models and prove translation works without network access.
+
+The build invokes normal installation, then --verify-only in a fresh process.
+The builder also runs --verify-only with --network none before exporting.
 """
-Download and install Argos Translate language models.
-
-Usage:
-    python3 install_languages.py [lang1,lang2,lang3,...]
-
-    - English (en) is always included as pivot language
-    - Romanian (ro) is always included as default
-    - Additional languages are passed as comma-separated codes
-    - All translation pairs go through English as pivot
-
-Example:
-    python3 install_languages.py en,ro,fr,de,es
-    python3 install_languages.py en,ro   (default: just English + Romanian)
-"""
+import argparse
+from contextlib import ExitStack
+from pathlib import Path
+import socket
 import sys
-import argostranslate.package
+from unittest.mock import patch
 
-# ============================================================
-# Available languages in Argos Translate
-# ============================================================
 AVAILABLE_LANGUAGES = {
     "sq": "Albanian",    "ar": "Arabic",      "az": "Azerbaijani",
     "eu": "Basque",      "bn": "Bengali",     "bg": "Bulgarian",
@@ -39,83 +30,86 @@ AVAILABLE_LANGUAGES = {
     "vi": "Vietnamese",
 }
 
-# ============================================================
-# Parse language list
-# ============================================================
-if len(sys.argv) > 1:
-    requested = [l.strip().lower() for l in sys.argv[1].split(",") if l.strip()]
-else:
-    requested = ["en", "ro"]
 
-# Always include English (pivot) and Romanian (default)
-if "en" not in requested:
-    requested.insert(0, "en")
-if "ro" not in requested:
-    requested.insert(1, "ro")
+def requested_languages(value):
+    languages = list(dict.fromkeys(["en", "ro"] + [x.strip().lower() for x in value.split(",") if x.strip()]))
+    invalid = sorted(set(languages) - AVAILABLE_LANGUAGES.keys())
+    if invalid:
+        raise ValueError("Unknown language codes: " + ", ".join(invalid))
+    return languages
 
-# Validate
-valid_langs = []
-for code in requested:
-    if code in AVAILABLE_LANGUAGES:
-        valid_langs.append(code)
-    else:
-        print(f"WARNING: Language code '{code}' not recognized, skipping.")
 
-print(f"Languages to install: {', '.join(f'{c} ({AVAILABLE_LANGUAGES[c]})' for c in valid_langs)}")
-print(f"Total: {len(valid_langs)} languages")
-print()
+def required_pairs(languages):
+    return {(a, b) for lang in languages if lang != "en"
+            for a, b in (("en", lang), (lang, "en"))}
 
-# ============================================================
-# Build translation pairs (all through English as pivot)
-# ============================================================
-pairs = set()
-for lang in valid_langs:
-    if lang != "en":
-        pairs.add(("en", lang))  # English -> X
-        pairs.add((lang, "en"))  # X -> English
 
-print(f"Translation pairs to install: {len(pairs)}")
-for src, tgt in sorted(pairs):
-    print(f"  {src} ({AVAILABLE_LANGUAGES.get(src, '?')}) -> {tgt} ({AVAILABLE_LANGUAGES.get(tgt, '?')})")
-print()
+def verify_installed(package, pairs):
+    installed = {(p.from_code, p.to_code) for p in package.get_installed_packages()}
+    missing = sorted(pairs - installed)
+    if missing:
+        raise RuntimeError("Missing translation models: " + ", ".join(f"{a}->{b}" for a, b in missing))
 
-# ============================================================
-# Download and install
-# ============================================================
-print("Updating package index...")
-argostranslate.package.update_package_index()
-pkgs = argostranslate.package.get_available_packages()
 
-installed = 0
-failed = 0
-for src, tgt in sorted(pairs):
-    found = False
-    for p in pkgs:
-        if p.from_code == src and p.to_code == tgt:
-            print(f"Installing {src} -> {tgt} ({AVAILABLE_LANGUAGES.get(src, '?')} -> {AVAILABLE_LANGUAGES.get(tgt, '?')})...")
-            try:
-                p.install()
-                installed += 1
-                found = True
-            except Exception as e:
-                print(f"  ERROR: {e}")
-                failed += 1
-                found = True
-            break
-    if not found:
-        print(f"WARNING: Package {src} -> {tgt} not found in index")
-        failed += 1
+def warmup_translations(pairs, translate):
+    # Exercise every direction so lazy sentence/tokenizer models are cached too.
+    samples = {"en": "Hello world. Thank you.", "ro": "Bună ziua. Mulțumesc."}
+    for source, target in sorted(pairs):
+        result = translate(samples.get(source, "Hello world."), source, target)
+        if not isinstance(result, str) or not result.strip():
+            raise RuntimeError(f"Empty warmup translation: {source}->{target}")
+        print(f"Translation verified: {source}->{target}")
 
-print()
-print(f"Installation complete: {installed} pairs installed, {failed} failed/missing")
 
-# Save installed languages to a file for runtime reference
-langs_file = "/app/installed_languages.txt" if __name__ == "__main__" else "installed_languages.txt"
-try:
-    with open(langs_file, "w") as f:
-        f.write(",".join(valid_langs))
-    print(f"Language list saved to {langs_file}")
-except:
-    pass
+def deny_network(*args, **kwargs):
+    raise RuntimeError("Offline verification attempted a network connection; a model/cache is missing.")
 
-print("Done!")
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("languages", nargs="?")
+    parser.add_argument("--verify-only", action="store_true", help="Require cached models and forbid network connections")
+    parser.add_argument("--output", type=Path, default=Path("/app/installed_languages.txt"))
+    args = parser.parse_args(argv)
+    value = args.languages
+    if value is None:
+        value = args.output.read_text().strip() if args.verify_only else "en,ro"
+    languages = requested_languages(value)
+    pairs = required_pairs(languages)
+
+    # Import and exercise dependencies under the network guard in verify mode.
+    with ExitStack() as stack:
+        if args.verify_only:
+            stack.enter_context(patch.object(socket.socket, "connect", deny_network))
+            stack.enter_context(patch.object(socket.socket, "connect_ex", deny_network))
+            stack.enter_context(patch.object(socket, "create_connection", deny_network))
+        import argostranslate.package as package
+        if not args.verify_only:
+            package.update_package_index()
+            available = {(p.from_code, p.to_code): p for p in package.get_available_packages()}
+            installed = {(p.from_code, p.to_code) for p in package.get_installed_packages()}
+            for source, target in sorted(pairs - installed):
+                model = available.get((source, target))
+                if model is None:
+                    raise RuntimeError(f"Required model absent from index: {source}->{target}")
+                print(f"Installing {source}->{target}...")
+                model.install()  # An installation error must fail the build.
+        verify_installed(package, pairs)
+        from argostranslate.translate import translate
+        warmup_translations(pairs, translate)
+
+    if not args.verify_only:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = args.output.with_suffix(args.output.suffix + ".tmp")
+        temporary.write_text(",".join(languages), encoding="utf-8")
+        temporary.replace(args.output)
+    print("Offline translation verified." if args.verify_only else "Models and sentence caches installed and verified.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1)

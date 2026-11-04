@@ -1,0 +1,10 @@
+# Allow only build inputs; never package local documents, credentials or caches.
+*
+!Containerfile
+!entrypoint.sh
+!install_languages.py
+!app
+app/*
+!app/*.py
+!app/static
+!app/static/**

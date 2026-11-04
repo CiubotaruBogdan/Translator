@@ -1,164 +1,112 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "============================================================"
-echo "  Traducator Offline - Container Starting"
-echo "============================================================"
+# Explicit commands (inspection, offline checks, maintenance) must not start services.
+if [ "$#" -gt 0 ]; then
+    exec "$@"
+fi
 
-# -- Auto-detect host IP for Ollama --
-echo ""
-echo "[0/3] Detecting host IP for Ollama connection..."
+APP_DIR=${TRANSLATOR_APP_DIR:-/app}
+PORT=${PORT:-8080}
+OLLAMA_PORT=${OLLAMA_PORT:-11434}
+TRANSLATE_ENGINE=${TRANSLATE_ENGINE:-libretranslate}
+export PORT TRANSLATE_ENGINE
 
-# If OLLAMA_URL is already set explicitly, use it
-if [ -n "$OLLAMA_URL" ] && [ "$OLLAMA_URL" != "auto" ]; then
-    echo "      OLLAMA_URL set explicitly: $OLLAMA_URL"
-else
-    OLLAMA_FOUND=0
-    OLLAMA_PORT=${OLLAMA_PORT:-11434}
+# A LAN deployment must never silently start with anonymous access.
+if [ -z "${TRANSLATOR_PASSWORD:-}" ]; then
+    if [ -z "${TRANSLATOR_PASSWORD_FILE:-}" ] || [ ! -r "$TRANSLATOR_PASSWORD_FILE" ] || [ ! -s "$TRANSLATOR_PASSWORD_FILE" ]; then
+        echo 'ERROR: configure TRANSLATOR_PASSWORD_FILE (recommended) or TRANSLATOR_PASSWORD before startup.' >&2
+        exit 1
+    fi
+fi
 
-    # Helper function: test if Ollama responds at given IP
-    try_ollama() {
-        local IP="$1"
-        local LABEL="$2"
-        echo "      Trying ${LABEL} (${IP}:${OLLAMA_PORT})..."
-        if curl -s --connect-timeout 3 "http://${IP}:${OLLAMA_PORT}/api/version" > /dev/null 2>&1; then
-            export OLLAMA_URL="http://${IP}:${OLLAMA_PORT}"
-            OLLAMA_FOUND=1
-            echo "      >>> OK! Ollama found at ${LABEL} (${IP})"
-            return 0
+if [ -z "${OLLAMA_URL:-}" ] || [ "$OLLAMA_URL" = auto ]; then
+    OLLAMA_URL="http://host.containers.internal:${OLLAMA_PORT}"
+    for host in host.containers.internal host.docker.internal; do
+        candidate="http://${host}:${OLLAMA_PORT}"
+        if curl --fail --silent --show-error --connect-timeout 2 --max-time 3 "$candidate/api/version" >/dev/null 2>&1; then
+            OLLAMA_URL="$candidate"
+            break
         fi
-        return 1
-    }
-
-    # Method 1: Try host.containers.internal (Podman standard)
-    try_ollama "host.containers.internal" "host.containers.internal" 2>/dev/null || true
-
-    # Method 2: Try host.docker.internal (Docker compatible)
-    [ $OLLAMA_FOUND -eq 0 ] && try_ollama "host.docker.internal" "host.docker.internal" 2>/dev/null || true
-
-    # Method 3: Try default gateway
-    if [ $OLLAMA_FOUND -eq 0 ]; then
-        GATEWAY_IP=$(ip route | grep default | awk '{print $3}' 2>/dev/null || echo "")
-        [ -n "$GATEWAY_IP" ] && try_ollama "$GATEWAY_IP" "gateway" 2>/dev/null || true
-    fi
-
-    # Method 4: Resolve host machine's real IPs via hostname from /etc/hosts
-    # Podman writes the host's hostname into /etc/hosts (e.g., "10.88.0.1 host.containers.internal")
-    # but also the container's own hostname which maps to the host machine name
-    if [ $OLLAMA_FOUND -eq 0 ]; then
-        echo "      Trying to discover host IPs via DNS/hostname..."
-        # Extract the host machine's FQDN from /etc/hosts (second line with a hostname, not localhost)
-        HOST_FQDN=$(awk '!/^#/ && !/localhost/ && !/host\.containers/ && !/host\.docker/ && !/ip6/ && NF>=2 {print $2; exit}' /etc/hosts 2>/dev/null || echo "")
-
-        if [ -n "$HOST_FQDN" ]; then
-            echo "      Host FQDN detected: ${HOST_FQDN}"
-            # Use nslookup to get all IPv4 addresses for this hostname
-            HOST_IPS=$(nslookup "$HOST_FQDN" 2>/dev/null | awk '/^Address:/ && !/#/ {print $2}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || echo "")
-
-            if [ -z "$HOST_IPS" ]; then
-                # Fallback: try dig
-                HOST_IPS=$(dig +short "$HOST_FQDN" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || echo "")
-            fi
-
-            for IP in $HOST_IPS; do
-                [ $OLLAMA_FOUND -eq 1 ] && break
-                try_ollama "$IP" "host-dns:${HOST_FQDN}" 2>/dev/null || true
-            done
-        fi
-    fi
-
-    # Method 5: Try host.wsl.internal (Windows WSL)
-    [ $OLLAMA_FOUND -eq 0 ] && try_ollama "host.wsl.internal" "host.wsl.internal" 2>/dev/null || true
-
-    # Method 6: Try common Docker/VM bridge IPs
-    if [ $OLLAMA_FOUND -eq 0 ]; then
-        for IP in 172.17.0.1 10.0.2.2 192.168.65.2; do
-            [ $OLLAMA_FOUND -eq 1 ] && break
-            try_ollama "$IP" "common-bridge" 2>/dev/null || true
-        done
-    fi
-
-    # Fallback
-    if [ $OLLAMA_FOUND -eq 0 ]; then
-        export OLLAMA_URL="http://host.containers.internal:${OLLAMA_PORT}"
-        echo ""
-        echo "      WARNING: Ollama not detected automatically."
-        echo "      Default: $OLLAMA_URL"
-        echo "      You can set OLLAMA_URL manually from the web interface Settings page."
-        echo "      Or restart with: -e OLLAMA_URL=http://YOUR_HOST_IP:11434"
-    fi
+    done
 fi
+export OLLAMA_URL
 
-echo ""
-echo "      Final OLLAMA_URL: $OLLAMA_URL"
-
-# -- Network diagnostics --
-echo ""
-echo "[1/3] Network diagnostics:"
-echo "      Container IP:  $(hostname -I 2>/dev/null || echo 'unknown')"
-echo "      Gateway:       $(ip route | grep default | awk '{print $3}' 2>/dev/null || echo 'unknown')"
-echo "      DNS:           $(cat /etc/resolv.conf 2>/dev/null | grep nameserver | head -1 | awk '{print $2}' || echo 'unknown')"
-
-# Ping tests
-echo "      Ping tests:"
-for HOST in host.containers.internal host.docker.internal; do
-    if ping -c 1 -W 2 "$HOST" > /dev/null 2>&1; then
-        RESOLVED_IP=$(getent hosts "$HOST" 2>/dev/null | awk '{print $1}' || echo "?")
-        echo "        $HOST -> OK (${RESOLVED_IP})"
-    else
-        echo "        $HOST -> UNREACHABLE"
-    fi
-done
-
-GATEWAY_IP=$(ip route | grep default | awk '{print $3}' 2>/dev/null || echo "")
-if [ -n "$GATEWAY_IP" ]; then
-    if ping -c 1 -W 2 "$GATEWAY_IP" > /dev/null 2>&1; then
-        echo "        gateway ($GATEWAY_IP) -> OK"
-    else
-        echo "        gateway ($GATEWAY_IP) -> UNREACHABLE"
-    fi
-fi
-
-# -- Start LibreTranslate in background --
-echo ""
-
-# Read installed languages from build-time file or env var
-if [ -f /app/installed_languages.txt ]; then
-    INSTALLED_LANGS=$(cat /app/installed_languages.txt)
-elif [ -n "$INSTALLED_LANGUAGES" ]; then
-    INSTALLED_LANGS="$INSTALLED_LANGUAGES"
+if [ -r "$APP_DIR/installed_languages.txt" ]; then
+    INSTALLED_LANGUAGES=$(cat "$APP_DIR/installed_languages.txt")
 else
-    INSTALLED_LANGS="en,ro"
+    INSTALLED_LANGUAGES=${INSTALLED_LANGUAGES:-en,ro}
+fi
+export INSTALLED_LANGUAGES
+LIBRETRANSLATE_URL=${LIBRETRANSLATE_URL:-http://127.0.0.1:5000}
+export LIBRETRANSLATE_URL
+
+LIBRE_PID=
+APP_PID=
+cleanup() {
+    trap - EXIT INT TERM
+    for pid in "${APP_PID:-}" "${LIBRE_PID:-}"; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; fi
+    done
+    for pid in "${APP_PID:-}" "${LIBRE_PID:-}"; do
+        if [ -n "$pid" ]; then wait "$pid" 2>/dev/null || true; fi
+    done
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+# A custom external LibreTranslate URL is allowed; only launch the bundled service
+# for the image's internal default. Never claim readiness from HTTP status alone.
+if [ "$LIBRETRANSLATE_URL" = http://127.0.0.1:5000 ] || [ "$LIBRETRANSLATE_URL" = http://localhost:5000 ]; then
+    libretranslate --host 127.0.0.1 --port 5000 --load-only "$INSTALLED_LANGUAGES" --threads 4 --disable-web-ui &
+    LIBRE_PID=$!
 fi
 
-echo "[2/3] Starting LibreTranslate on port 5000..."
-echo "      Languages: ${INSTALLED_LANGS}"
-libretranslate --host 127.0.0.1 --port 5000 --load-only "${INSTALLED_LANGS}" --threads 4 --disable-web-ui &
-LIBRE_PID=$!
-
-# Wait for LibreTranslate to be ready
-echo "      Waiting for LibreTranslate to initialize..."
-for i in $(seq 1 60); do
-    if curl -s http://127.0.0.1:5000/languages > /dev/null 2>&1; then
-        echo "      LibreTranslate is ready!"
+start_timeout=${TRANSLATOR_START_TIMEOUT:-120}
+if ! [[ "$start_timeout" =~ ^[1-9][0-9]*$ ]]; then
+    echo 'ERROR: TRANSLATOR_START_TIMEOUT must be a positive number of seconds.' >&2
+    exit 1
+fi
+ready=0
+deadline=$((SECONDS + start_timeout))
+while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -n "$LIBRE_PID" ] && ! kill -0 "$LIBRE_PID" 2>/dev/null; then
+        echo 'ERROR: LibreTranslate exited during startup.' >&2
         break
     fi
-    if [ $i -eq 60 ]; then
-        echo "      WARNING: LibreTranslate did not start within 60s, continuing anyway..."
+    if curl --fail --silent --show-error --connect-timeout 2 --max-time 3 "$LIBRETRANSLATE_URL/languages" 2>/dev/null |
+        python3 -c 'import json,os,sys; data=json.load(sys.stdin); assert isinstance(data,list); codes={x["code"] for x in data}; assert set(os.environ["INSTALLED_LANGUAGES"].split(",")) <= codes' 2>/dev/null; then
+        ready=1
+        break
     fi
     sleep 1
 done
+if [ "$ready" -ne 1 ]; then
+    if [ "$TRANSLATE_ENGINE" = libretranslate ]; then
+        echo 'ERROR: required LibreTranslate language models are not ready; startup aborted.' >&2
+        exit 1
+    fi
+    echo 'WARNING: optional LibreTranslate is unavailable; selected Ollama engine will be checked by /healthz.' >&2
+fi
 
-# -- Start web server --
-PORT=${PORT:-8080}
-echo ""
-echo "[3/3] Starting web server on port $PORT..."
-echo "============================================================"
-echo "  Web UI:         http://0.0.0.0:$PORT"
-echo "  LibreTranslate: http://127.0.0.1:5000 (internal)"
-echo "  Ollama:         $OLLAMA_URL"
-echo "  Cleanup:        daily at midnight (automatic)"
-echo "============================================================"
+cd "$APP_DIR"
+echo "Starting Translator on port $PORT; required engine: $TRANSLATE_ENGINE."
+echo 'LAN access requires username translator and the configured shared password.'
+python3 server.py &
+APP_PID=$!
 
-cd /app
-exec python3 server.py
+# Exit if the required engine dies; do not leave a healthy-looking web process.
+set +e
+if [ "$TRANSLATE_ENGINE" = libretranslate ] && [ -n "$LIBRE_PID" ]; then
+    wait -n "$APP_PID" "$LIBRE_PID"
+    status=$?
+    if kill -0 "$APP_PID" 2>/dev/null; then
+        echo 'ERROR: required LibreTranslate stopped; stopping the web service.' >&2
+        status=1
+    fi
+else
+    wait "$APP_PID"
+    status=$?
+fi
+exit "$status"

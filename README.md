@@ -2,6 +2,18 @@
 
 O soluție completă de traducere a documentelor, containerizată, proiectată pentru a funcționa 100% offline pe o stație Windows 11. Aplicația oferă o interfață web accesibilă în rețeaua locală și suportă multiple motoare de traducere și formate de documente, cu accent pe păstrarea formatării.
 
+## Acces și pornire
+
+Aplicația solicită autentificare pentru interfață, documente, istoric, API, SSE și WebSocket. Utilizatorul este **`translator`**, iar parola este comună pentru utilizatorii autorizați din LAN. Aceștia partajează aceleași documente și operații; nu există conturi sau spații separate per utilizator.
+
+La prima pornire cu `traducator_manager.bat`, helper-ul **`configure_access.ps1`** solicită parola mascat, cu confirmare și minimum 12 caractere. Managerul o înregistrează ca secret Podman, fără a o transmite în argumentele proceselor. Fișierul local `translator-password.txt` are permisiuni restrânse și nu trebuie distribuit împreună cu aplicația. Containerul primește secretul prin `TRANSLATOR_PASSWORD_FILE=/run/secrets/translator-password`.
+
+Pentru pornire manuală sau dezvoltare, configurează **`TRANSLATOR_PASSWORD_FILE`** către un fișier protejat care conține parola, ori **`TRANSLATOR_PASSWORD`** prin mecanismul de secrete al mediului. Nu introduce parola în repository. Fără o parolă configurată, accesul este refuzat; containerul nu pornește serviciile anonime. Browserul solicită utilizatorul și parola, iar sesiunea este valabilă până la 8 ore. Folosește HTTPS printr-un reverse proxy dacă rețeaua nu este complet de încredere: autentificarea Basic pe HTTP nu criptează parola sau documentele în tranzit.
+
+Adresele motoarelor permise sunt cele configurate la pornire prin `OLLAMA_URL` și `LIBRETRANSLATE_URL`. Pentru destinații suplimentare, administratorul setează **`TRANSLATOR_ALLOWED_ENGINE_URLS`** ca listă de origini separate prin virgulă, de exemplu `http://server-llm:11434,http://server-traduceri:5000`. Nu sunt acceptate căi, parametri, fragmente, credențiale în URL sau redirecționări. Interfața nu poate extinde această listă.
+
+Endpoint-ul public **`/healthz`** returnează doar disponibilitatea minimă: HTTP 200 când accesul și motorul selectat sunt pregătite, respectiv 503 când nu sunt. Detaliile din `/api/status` necesită autentificare.
+
 ## Arhitectura Sistemului
 
 Soluția este construită pe o arhitectură modulară, centrată în jurul unui container Podman/Docker care rulează pe o mașină gazdă Windows. Această abordare asigură portabilitate maximă și un mediu de rulare izolat și consistent.
@@ -73,9 +85,9 @@ graph LR
 1.  **Upload**: Un utilizator încarcă un document (DOCX, PDF, TXT) prin interfața web.
 2.  **Creare Job**: Backend-ul FastAPI primește fișierul, creează un job unic și îl adaugă la coadă.
 3.  **Extragere Text**: Pipeline-ul de traducere determină tipul fișierului:
-    *   **DOCX**: Textul este extras segmentat (paragraf cu paragraf, celulă de tabel cu celulă), păstrând referințe la stiluri și formatare.
+    *   **DOCX**: Textul este extras segmentat din corp, tabele, antete și subsoluri, păstrând referințe la structură, hyperlinkuri și formatare.
     *   **PDF Digital**: Fișierul este convertit în DOCX folosind `pdf2docx` pentru a păstra layout-ul, apoi este tratat ca un fișier DOCX.
-    *   **PDF Scanat**: Se rulează Tesseract OCR pentru a extrage textul, care este apoi asamblat într-un document text simplu.
+    *   **PDF Scanat sau Mixt**: Fiecare pagină este analizată separat. Paginile digitale își păstrează conversia de layout, iar cele scanate sunt citite prin Tesseract OCR; rezultatele sunt reunite în DOCX. Formatarea paginilor scanate depinde de recunoașterea OCR.
     *   **TXT**: Textul este citit direct.
 4.  **Fragmentare (Chunking)**: Textul extras este împărțit în fragmente (chunks) optimizate pentru a fi trimise motorului de traducere.
 5.  **Traducere Paralelă**: Fragmentele sunt trimise în paralel către motorul de traducere selectat (Ollama sau LibreTranslate).
@@ -85,7 +97,7 @@ graph LR
 
 ### Păstrarea formatării inline (DOCX)
 
-Pentru paragrafele cu formatare mixtă (ex. un cuvânt **îngroșat** în mijlocul propoziției), aplicația grupează run-urile cu aceeași formatare și le marchează cu jetoane `⟦0⟧ ⟦1⟧…` înainte de traducere. Motorul este instruit să păstreze marcajele, iar textul tradus este redistribuit înapoi în run-urile originale, păstrând bold/italic/subliniere/culoare exact pe porțiunile corecte. Dacă motorul nu păstrează marcajele, se aplică automat un *fallback* sigur (tot textul în formatarea primului run), fără ca marcajele să apară vreodată în document.
+Pentru paragrafele cu formatare mixtă (ex. un cuvânt **îngroșat** în mijlocul propoziției), aplicația grupează run-urile cu aceeași formatare și le marchează cu jetoane `⟦0⟧ ⟦1⟧…` înainte de traducere. Motorul este instruit să păstreze marcajele, iar textul tradus este redistribuit după identitatea numerică a marcajelor, inclusiv când modelul le reordonează. Imaginile și elementele non-text nu sunt șterse la înlocuirea textului, iar hyperlinkurile își păstrează adresele. Dacă motorul nu păstrează marcajele, se aplică automat un *fallback* sigur (tot textul în formatarea primului run), fără ca marcajele să apară vreodată în document.
 
 **Prompt original TranslateGemma**: instrucțiunea de marcaje de mai sus modifică promptul trimis modelului. Pentru cazurile în care vrei fidelitate maximă față de model, există în *Setări* bifa **„Păstrează promptul original TranslateGemma"**. Când e activă (pentru Ollama, atât la documente cât și la text), modelul primește exact promptul nativ recomandat pe [pagina modelului](https://ollama.com/library/translategemma) — cu codurile de limbă și cele două linii goale, fără nicio instrucțiune de formatare. În acest mod formatarea inline NU mai este păstrată, iar la documente segmentele se traduc individual (fără batching).
 
@@ -104,13 +116,13 @@ Rezultatele apar într-un panou cu sumar (câte segmente OK / minore / majore, s
 
 **Context la verificare**: implicit, reviewer-ul primește și **N segmente vecine din original** (dinainte și de după, configurabil 0–5 în *Setări → Model de verificare*) ca text de context — doar pentru a înțelege referințe, terminologie și ton, fără a fi evaluat. Opțional, bifa **„Include și traducerile vecine în context"** adaugă și traducerea segmentelor vecine, pentru consistență terminologică și fluență între segmente. Contextul este limitat ca dimensiune pentru a încăpea în fereastra modelului (`num_ctx`).
 
-**Aplicarea propunerilor**: fiecare propunere/editare poate fi bifată („Aplică..."), iar butonul **„Generează document revizuit"** reconstruiește documentul înlocuind segmentele acceptate cu traducerile îmbunătățite sau editate manual. Pentru fișierele **DOCX** revizuirea se aplică peste originalul, păstrând formatarea — inclusiv cea **inline** (reviewer-ul primește traducerea cu marcaje `⟦n⟧` și le păstrează în propunere, astfel încât bold/italic/culoarea se reaplică și pe textul îmbunătățit; segmentele *editate manual* nu poartă marcaje, deci pe acelea formatarea inline nu se reaplică); pentru TXT/PDF se generează un document cu textul corectat. Documentul revizuit se descarcă separat (cu sufixul **`_review`** în nume, ex. `document_en_revizuit_review.docx`), fără a suprascrie traducerea inițială.
+**Aplicarea propunerilor**: fiecare propunere/editare poate fi bifată („Aplică..."), iar butonul **„Generează document revizuit"** reconstruiește documentul înlocuind segmentele acceptate cu traducerile îmbunătățite sau editate manual. Pentru fișierele **DOCX** revizuirea se aplică peste originalul, păstrând formatarea — inclusiv cea **inline** (reviewer-ul primește traducerea cu marcaje `⟦n⟧` și le păstrează în propunere, astfel încât bold/italic/culoarea se reaplică și pe textul îmbunătățit; segmentele *editate manual* nu poartă marcaje, deci pe acelea formatarea inline nu se reaplică); pentru TXT se generează textul corectat, iar pentru PDF se reutilizează DOCX-ul intermediar păstrat pentru a conserva structura și imaginile obținute la conversie. Documentul revizuit se descarcă separat (cu sufixul **`_review`** în nume, ex. `document_en_revizuit_review.docx`), fără a suprascrie traducerea inițială.
 
 **API**: `POST /api/jobs/{id}/review` (pornire; parametri: `model`, `concurrency`, `context_window`, `context_translations` ș.a.), `GET /api/jobs/{id}/review` (progres + rezultate), `POST /api/jobs/{id}/review/cancel` (anulare), `POST /api/jobs/{id}/review/apply` (aplică propunerile/editările alese — câmpurile `indices` și `edits`), `GET /api/jobs/{id}/review/download` (descarcă documentul revizuit), `POST /api/review-text` (verificare ad-hoc a unei perechi original/traducere). Fiecare cerere de verificare apare și în istoricul „CMD" (tip `review`).
 
 ### Verificarea unei traduceri externe (tab „Verifică traducere")
 
-Pe lângă verificarea unui job propriu, există un tab dedicat **„Verifică traducere"** pentru documente traduse **în afara aplicației**. Încarci documentul **original** și documentul **tradus** (DOCX, PDF, TXT, MD), alegi limbile, apoi apeși **„Verifică traducerea"**. Aplicația segmentează ambele documente, **aliniază segmentele pe poziție** (paragraf cu paragraf, inclusiv paragrafele din celulele tabelelor) și deschide direct fereastra de verificare descrisă mai sus — cu tot ce ține de ea: verdicte/scor, editare manuală, filtrare, copiere, context vecin și generarea documentului revizuit cu sufix `_review`.
+Pe lângă verificarea unui job propriu, există un tab dedicat **„Verifică traducere"** pentru documente traduse **în afara aplicației**. Încarci documentul **original** și documentul **tradus** (DOCX, PDF, TXT, MD), alegi limbile, apoi apeși **„Verifică traducerea"**. PDF-urile scanate trec prin OCR. Aplicația segmentează ambele documente, **aliniază segmentele în structura documentului** (corp, tabele, antete și subsoluri, când există metadate DOCX; pe poziție pentru text simplu) și deschide direct fereastra de verificare descrisă mai sus — cu tot ce ține de ea: verdicte/scor, editare manuală, filtrare, copiere, context vecin și generarea documentului revizuit cu sufix `_review`.
 
 - **Aliniere**: dacă cele două documente au un număr diferit de segmente, se verifică partea comună și se afișează un **avertisment**. Pentru rezultate corecte, documentele ar trebui să aibă aceeași structură (același număr de paragrafe) — cazul tipic fiind un original și traducerea lui produsă cu aceeași aplicație.
 - **Tabele și editări**: verificarea include celulele, paragrafele multiple dintr-o celulă și tabelele imbricate, fără dublarea celulelor îmbinate. Modificările selectate, inclusiv editările manuale și ștergerea textului, se aplică în documentul descărcat. La verificarea unui document extern, baza este documentul **tradus** încărcat, astfel încât conținutul neselectat și segmentele suplimentare rămân intacte.
@@ -121,12 +133,26 @@ Pe lângă verificarea unui job propriu, există un tab dedicat **„Verifică t
 
 Pagina **`/prompts.html`** expune istoricul fiecărei cereri trimise către motorul de traducere: **promptul exact trimis** și **răspunsul brut primit**, împreună cu motorul, modelul, perechea de limbi, numărul de încercări, durata și eventualele erori. Util pentru depanare și transparență. Datele sunt disponibile și prin API: `GET /api/prompts` (filtrabil după `job_id` și `engine`), `DELETE /api/prompts` pentru golire.
 
+## Integritatea rezultatelor și gestionarea fișierelor
+
+- Un răspuns de lot cu segmente lipsă, suplimentare sau goale declanșează traducerea individuală. Erorile de segment nu sunt transformate în documente raportate ca finalizate.
+- Limita de fragmentare se aplică și propozițiilor/paragrafelor lungi. Fragmentele din același paragraf DOCX sunt reunite în poziția lor inițială.
+- Anularea și ștergerea joburilor opresc și așteaptă taskurile de traducere/verificare. Curățarea nu șterge fișierele operațiilor active, inclusiv OCR.
+- Curățarea programată elimină fișierele inactive mai vechi decât **`FILE_RETENTION_HOURS`** (implicit 24 de ore). Curățarea manuală elimină fișierele inactive și raportează câte fișiere active au fost păstrate.
+- Managerul folosește volumele Podman **`traducator-uploads`** și **`traducator-outputs`**. Start/Oprire păstrează containerul și documentele; eliminarea unui container nu elimină aceste volume. Politica de retenție continuă să se aplice.
+- Fișierele păstrate pot fi descărcate din **Loguri & Sistem**, inclusiv după repornire. Joburile, istoricul prompturilor și sesiunile de progres sunt în memorie și se resetează la repornirea procesului.
+- `.dockerignore` și `.containerignore` permit numai fișierele necesare construirii imaginii. Documentele utilizatorilor, secretele și cache-urile locale sunt excluse.
+
 ## Management și Deployment
 
 Întregul ciclu de viață al aplicației este gestionat prin două scripturi batch interactive:
 
 -   **`builder.bat` (Stația Online)**: Construiește imaginea containerului și o exportă într-un fișier `.tar` pentru transfer.
 -   **`traducator_manager.bat` (Stația Offline)**: Oferă un meniu complet pentru a încărca imaginea, a porni/opri serviciile, a vizualiza loguri și a rula diagnosticări de rețea.
+
+Construirea instalează modelele cerute și încălzește cache-urile de segmentare. Exportul este precedat de traduceri de verificare cu rețeaua containerului oprită; o pereche lipsă sau un download necesar în acest pas oprește operația. Transferă și `configure_access.ps1` împreună cu managerul.
+
+Încărcarea unei imagini noi nu actualizează automat un container existent. Pentru migrare și actualizare, urmează pașii de backup din tutorial; managerul refuză pornirea automată a containerelor vechi fără configurația de acces securizat.
 
 Pentru instrucțiuni detaliate de instalare și utilizare, consultați **[TUTORIAL_DOCKER.md](TUTORIAL_DOCKER.md)**.
 
@@ -139,4 +165,12 @@ Cu dependențele Python din `Containerfile` instalate, rulează din rădăcina r
 python -m unittest discover -s tests -v
 ```
 
-Testele verifică aplicarea editărilor și sugestiilor în tabele DOCX, păstrarea conținutului neselectat, validarea cererilor de revizuire și raportarea eșecurilor motoarelor. Răspunsurile motoarelor sunt simulate în aceste teste; calitatea traducerilor și disponibilitatea unui model real trebuie verificate separat cu serviciul Ollama sau LibreTranslate configurat.
+Testele acoperă documente/tabele/imagini/hyperlinkuri, PDF-uri mixte, validarea modelelor, autentificarea, destinațiile de rețea, uploadurile, anularea și curățarea fișierelor, precum și instalarea și startup-ul containerului.
+
+Testele interfeței rulează separat cu Playwright și Chromium:
+
+```bash
+python tests/browser_regressions.py
+```
+
+Pentru acestea instalează pachetul Python `playwright` și browserul Chromium (ori `python -m playwright install chromium`, conform instrucțiunilor testului). Răspunsurile motoarelor sunt controlate în testele automate; calitatea traducerilor, GPU-ul și disponibilitatea unui model real trebuie verificate separat. Verificarea offline din builder folosește modelele reale incluse în imagine. Scripturile Windows trebuie validate și pe stația Windows/Podman folosită pentru distribuție.

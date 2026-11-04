@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 app/uploads/
 app/outputs/
+
+# Local LAN credentials and environment configuration
+translator-password.txt
+*.secret
+.env
+.env.*

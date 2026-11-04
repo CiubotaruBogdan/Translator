@@ -19,6 +19,9 @@ cd /d "!SCRIPT_DIR!"
 set "CONTAINER_NAME=traducator-offline"
 set "IMAGE_NAME=traducator-offline"
 set "DEFAULT_PORT=80"
+set "SECRET_NAME=traducator-password"
+set "UPLOAD_VOLUME=traducator-uploads"
+set "OUTPUT_VOLUME=traducator-outputs"
 
 :MENU
 cls
@@ -143,98 +146,99 @@ echo  ============================================================
 echo   2. PORNESTE SERVICIILE
 echo  ============================================================
 echo.
-echo  Containerul va detecta automat adresa Ollama la pornire.
-echo  Ollama trebuie sa ruleze pe aceasta statie (sau pe o statie din retea).
-echo.
-echo  IMPORTANT: Ollama trebuie configurat sa asculte pe 0.0.0.0
-echo  (foloseste optiunea 8 din meniu pentru configurare automata)
-echo.
+:: Start preserves the existing container and its documents/settings.
+podman container exists %CONTAINER_NAME% >nul 2>&1
+if not errorlevel 1 goto START_EXISTING
 
 set "USER_PORT="
 set /p "USER_PORT=  Port web [%DEFAULT_PORT%]: "
 if "!USER_PORT!"=="" set "USER_PORT=%DEFAULT_PORT%"
+powershell -NoProfile -Command "$n=0; if (-not [int]::TryParse($env:USER_PORT,[ref]$n) -or $n -lt 1 -or $n -gt 65535) { exit 1 }"
+if errorlevel 1 goto START_INVALID_SETTINGS
 
 echo.
-echo  Introdu adresa masinii pe care ruleaza Ollama.
-echo  (Apasa Enter pentru detectie automata - recomandat)
-echo.
+echo  Introdu adresa serverului Ollama; Enter pentru detectie automata.
 set "USER_OLLAMA="
-set /p "USER_OLLAMA=  Ollama URL [http://ADRESA_IP_A_MASINII_CU_OLLAMA:11434]: "
+set /p "USER_OLLAMA=  Ollama URL [auto]: "
 if "!USER_OLLAMA!"=="" set "USER_OLLAMA=auto"
+powershell -NoProfile -Command "if ($env:USER_OLLAMA -eq 'auto') { exit 0 }; $u=$null; if (-not [uri]::TryCreate($env:USER_OLLAMA,[UriKind]::Absolute,[ref]$u)) { exit 1 }; if ($u.Scheme -notin @('http','https') -or $u.UserInfo -or $u.Query -or $u.Fragment -or $u.AbsolutePath -ne '/') { exit 1 }"
+if errorlevel 1 goto START_INVALID_SETTINGS
 
+:: Passwords are never read into cmd.exe or passed on a command line.
+podman secret inspect %SECRET_NAME% >nul 2>&1
+if not errorlevel 1 goto START_SECRET_READY
+powershell -NoProfile -ExecutionPolicy Bypass -File "!SCRIPT_DIR!\configure_access.ps1"
+if errorlevel 1 goto START_FAILED
+podman secret create %SECRET_NAME% "!SCRIPT_DIR!\translator-password.txt" >nul
+if errorlevel 1 goto START_FAILED
+
+:START_SECRET_READY
 echo.
-echo  Se opreste containerul existent (daca exista)...
-podman stop %CONTAINER_NAME% >nul 2>&1
-podman rm %CONTAINER_NAME% >nul 2>&1
+echo  Se creeaza un container cu volume persistente si acces cu parola.
+echo  Utilizator in browser: translator
+podman run -d --name %CONTAINER_NAME% --label org_translator_manager=2 -p !USER_PORT!:8080 -e "OLLAMA_URL=!USER_OLLAMA!" -e PORT=8080 -e TRANSLATOR_PASSWORD_FILE=/run/secrets/translator-password --secret %SECRET_NAME%,type=mount,target=translator-password -v %UPLOAD_VOLUME%:/app/uploads -v %OUTPUT_VOLUME%:/app/outputs --restart unless-stopped %IMAGE_NAME%
+if errorlevel 1 goto START_FAILED
+goto START_WAIT
 
-echo.
-echo  Se porneste containerul...
-echo    Port web:   !USER_PORT!
-echo    Ollama:     !USER_OLLAMA!
-echo.
+:START_EXISTING
+set "MANAGED_VERSION="
+for /f "delims=" %%a in ('podman inspect --format "{{.Config.Labels.org_translator_manager}}" %CONTAINER_NAME% 2^>nul') do set "MANAGED_VERSION=%%a"
+if not "!MANAGED_VERSION!"=="2" goto START_LEGACY
+podman start %CONTAINER_NAME% >nul
+if errorlevel 1 goto START_FAILED
+set "USER_PORT=%DEFAULT_PORT%"
+for /f "delims=" %%a in ('powershell -NoProfile -Command "$p=@(podman port $env:CONTAINER_NAME 8080/tcp); if ($LASTEXITCODE -ne 0 -or $p.Count -eq 0) { exit 1 }; ($p[0] -split ':')[-1]"') do set "USER_PORT=%%a"
+echo  Containerul existent a fost pornit. Documentele si configuratia sunt pastrate.
+echo  Pentru actualizarea imaginii, urmeaza procedura de upgrade din README.
+goto START_WAIT
 
-:: Run podman - use goto to avoid if/else block parsing issues
-if not "!USER_OLLAMA!"=="auto" goto START_CUSTOM_URL
+:START_LEGACY
+echo  Containerul existent provine dintr-o versiune anterioara sau are alta configuratie.
+echo  Nu a fost sters sau pornit automat. Documentele sale au fost pastrate.
+echo  Urmeaza pasii de backup si migrare din README inainte de recreare.
+echo  Versiunea noua necesita parola comuna si volume persistente.
+pause
+goto MENU
 
-podman run -d --name %CONTAINER_NAME% -p !USER_PORT!:8080 -e OLLAMA_URL=auto -e PORT=8080 --restart unless-stopped %IMAGE_NAME%
-goto START_CHECK_RESULT
+:START_INVALID_SETTINGS
+echo  EROARE: Port invalid sau URL Ollama invalid.
+echo  Foloseste port 1-65535 si URL http/https cu gazda si port, fara cale sau parola.
+pause
+goto MENU
 
-:START_CUSTOM_URL
-podman run -d --name %CONTAINER_NAME% -p !USER_PORT!:8080 -e "OLLAMA_URL=!USER_OLLAMA!" -e PORT=8080 --restart unless-stopped %IMAGE_NAME%
-
-:START_CHECK_RESULT
-if !ERRORLEVEL! NEQ 0 goto START_FAILED
-
-echo.
-echo  Containerul a pornit! Se asteapta initializarea serviciilor...
-echo.
-
-:: Wait for web server to be ready
+:START_WAIT
 set "WAIT_COUNT=0"
 :WAIT_LOOP
 set /a WAIT_COUNT+=1
 if !WAIT_COUNT! GTR 30 goto START_TIMEOUT
-
-curl -s -o NUL "http://localhost:!USER_PORT!/api/status" >nul 2>&1
+curl --fail --silent --connect-timeout 2 --max-time 4 -o NUL "http://127.0.0.1:!USER_PORT!/healthz" >nul 2>&1
 if not errorlevel 1 goto START_READY
-
-echo    Se asteapta... !WAIT_COUNT!/30
+echo    Se asteapta initializarea motorului... !WAIT_COUNT!/30
 timeout /t 2 /nobreak >nul
 goto WAIT_LOOP
 
 :START_TIMEOUT
-echo.
-echo  ATENTIE: Serviciile nu au raspuns in 60 de secunde.
-echo  Containerul ruleaza, dar LibreTranslate poate avea nevoie de mai mult timp.
-echo  Verificati cu optiunea 3.
-echo.
+echo  Motorul selectat nu a devenit disponibil. Verifica optiunile 3 si 5.
+echo  Containerul si documentele sunt pastrate.
 goto START_DONE
 
 :START_READY
 echo.
-echo  ============================================================
-echo   SERVICIILE AU PORNIT CU SUCCES
-echo  ============================================================
-echo.
-echo   Interfata web:  http://localhost:!USER_PORT!
-echo   Din retea:      http://%COMPUTERNAME%:!USER_PORT!
-echo.
-echo   Ollama: detectat automat de container (vezi loguri cu opt. 5)
-echo.
+echo  Aplicatia si motorul selectat sunt pregatite.
+echo  Interfata web: http://localhost:!USER_PORT!
+echo  Din retea: http://%COMPUTERNAME%:!USER_PORT!
+echo  Utilizator: translator - parola stabilita la prima configurare.
 
 :START_DONE
+set "OPEN_BROWSER="
 set /p "OPEN_BROWSER=  Deschid browserul? (D/N): "
 if /i "!OPEN_BROWSER!"=="D" start "" "http://localhost:!USER_PORT!"
-
-echo.
 pause
 goto MENU
 
 :START_FAILED
-echo.
-echo  EROARE: Containerul nu a pornit!
-echo  Asigura-te ca imaginea este incarcata - optiunea 1.
-echo.
+echo  EROARE: Pornirea a esuat. Verifica imaginea, parola si logurile.
+echo  Niciun container existent nu a fost sters.
 pause
 goto MENU
 
@@ -244,90 +248,9 @@ goto MENU
 :CHECK
 cls
 echo.
-echo  ============================================================
-echo   3. VERIFICARE SERVICII
-echo  ============================================================
-echo.
-
-:: Check container
-echo  [CONTAINER]
-set "CONTAINER_RUNNING=0"
-for /f "tokens=*" %%a in ('podman ps --filter "name=%CONTAINER_NAME%" --format "{{.Status}}" 2^>nul') do (
-    echo    Stare: %%a
-    set "CONTAINER_RUNNING=1"
-)
-if !CONTAINER_RUNNING! EQU 0 (
-    echo    Stare: NU RULEAZA
-    echo.
-    echo  Porneste containerul cu optiunea 2.
-    echo.
-    pause
-    goto MENU
-)
-echo.
-
-:: Detect port
-set "CHECK_PORT=%DEFAULT_PORT%"
-for /f "tokens=*" %%a in ('podman port %CONTAINER_NAME% 8080 2^>nul') do (
-    for /f "tokens=2 delims=:" %%b in ("%%a") do set "CHECK_PORT=%%b"
-)
-
-:: Check Web Server
-echo  [SERVER WEB - port !CHECK_PORT!]
-curl -s -o NUL -w "" "http://localhost:!CHECK_PORT!/api/status" >nul 2>&1
-if not errorlevel 1 (
-    echo    Rezultat: OK - Serverul web raspunde
-) else (
-    echo    Rezultat: INACCESIBIL
-    echo.
-    echo  Serverul web nu raspunde. Verificati logurile cu optiunea 5.
-    echo.
-    pause
-    goto MENU
-)
-echo.
-
-:: Check LibreTranslate via API
-echo  [LIBRETRANSLATE - intern in container]
-for /f "delims=" %%a in ('curl -s "http://localhost:!CHECK_PORT!/api/libretranslate" 2^>nul') do (
-    echo %%a | findstr /i "true" >nul 2>&1
-    if not errorlevel 1 (
-        echo    Stare: CONECTAT
-    ) else (
-        echo    Stare: DECONECTAT (poate dura pana la 60s sa porneasca)
-    )
-)
-echo.
-
-:: Check Ollama via API
-echo  [OLLAMA - extern pe gazda]
-for /f "delims=" %%a in ('curl -s "http://localhost:!CHECK_PORT!/api/models" 2^>nul') do (
-    echo %%a | findstr /i "\"connected\":true" >nul 2>&1
-    if not errorlevel 1 (
-        echo    Stare: CONECTAT
-        echo    Detalii: %%a
-    ) else (
-        echo    Stare: DECONECTAT
-        echo.
-        echo    Posibile cauze:
-        echo      - Ollama nu ruleaza pe aceasta statie
-        echo      - Ollama nu asculta pe 0.0.0.0 (foloseste optiunea 8)
-        echo      - Firewall blocheaza portul 11434
-    )
-)
-echo.
-
-:: Show detected Ollama URL from container
-echo  [OLLAMA URL DETECTAT]
-for /f "delims=" %%a in ('curl -s "http://localhost:!CHECK_PORT!/api/system-info" 2^>nul') do (
-    echo    %%a | findstr /i "ollama_url" >nul 2>&1
-    if not errorlevel 1 echo    %%a
-)
-echo.
-
-echo  ============================================================
-echo.
-echo  TIP: Foloseste optiunea 9 pentru diagnosticare detaliata retea.
+echo  Verificare autentificata a aplicatiei si motoarelor...
+podman exec %CONTAINER_NAME% python3 /app/manager_client.py status
+if errorlevel 1 echo  Verificarea a esuat. Consulta logurile cu optiunea 5.
 echo.
 pause
 goto MENU
@@ -354,6 +277,9 @@ if errorlevel 1 (
 )
 
 echo.
+echo  Stergerea containerului vechi fara volume poate pierde documentele sale.
+echo  Volumele traducator-uploads/traducator-outputs ale versiunii noi se pastreaza.
+set "REMOVE="
 set /p "REMOVE=  Stergi si containerul? (D/N): "
 if /i "!REMOVE!"=="D" (
     podman rm %CONTAINER_NAME% >nul 2>&1
@@ -431,19 +357,16 @@ echo.
 set /p "CONFIRM_CLEAN=  Esti sigur? (D/N): "
 if /i not "!CONFIRM_CLEAN!"=="D" goto MENU
 
-:: Detect port
-set "CLEAN_PORT=%DEFAULT_PORT%"
-for /f "tokens=*" %%a in ('podman port %CONTAINER_NAME% 8080 2^>nul') do (
-    for /f "tokens=2 delims=:" %%b in ("%%a") do set "CLEAN_PORT=%%b"
+echo.
+echo  Se curata fisierele eligibile; joburile active sunt protejate.
+podman exec %CONTAINER_NAME% python3 /app/manager_client.py cleanup
+if errorlevel 1 (
+    echo  EROARE: Curatarea nu a reusit. Fisierele neprocesate au fost pastrate.
+) else (
+    echo  Curatarea s-a finalizat.
 )
+echo.
 
-echo.
-echo  Se curata fisierele...
-curl -s -X POST "http://localhost:!CLEAN_PORT!/api/files/cleanup" 2>nul
-echo.
-echo.
-echo  Curatarea s-a finalizat.
-echo.
 pause
 goto MENU
 
@@ -526,7 +449,7 @@ if /i "!RESTART_OLLAMA!"=="D" (
     echo  Ollama a fost repornit.
     echo.
     echo  Verificare:
-    curl -s "http://localhost:11434/api/version" 2>nul
+    curl --fail --silent --connect-timeout 2 --max-time 5 "http://localhost:11434/api/version" 2>nul
     echo.
 )
 
@@ -563,10 +486,10 @@ echo    Hostname: %COMPUTERNAME%
 echo.
 
 echo  Se verifica daca Ollama ruleaza pe gazda...
-curl -s "http://localhost:11434/api/version" >nul 2>&1
+curl --fail --silent --connect-timeout 2 --max-time 5 "http://localhost:11434/api/version" >nul 2>&1
 if not errorlevel 1 (
     echo    Ollama pe gazda: DA (port 11434 raspunde)
-    for /f "delims=" %%a in ('curl -s "http://localhost:11434/api/version" 2^>nul') do echo    Versiune: %%a
+    for /f "delims=" %%a in ('curl --fail --silent --connect-timeout 2 --max-time 5 "http://localhost:11434/api/version" 2^>nul') do echo    Versiune: %%a
 ) else (
     echo    Ollama pe gazda: NU (port 11434 nu raspunde)
     echo    Porneste Ollama si asigura-te ca OLLAMA_HOST=0.0.0.0:11434
@@ -601,13 +524,13 @@ for /f "tokens=3" %%a in ('podman exec %CONTAINER_NAME% ip route show default 2^
     podman exec %CONTAINER_NAME% ping -c 1 -W 2 %%a 2>nul
     echo.
     echo  --- Test Ollama pe gateway ---
-    podman exec %CONTAINER_NAME% curl -s --connect-timeout 3 "http://%%a:11434/api/version" 2>nul
+    podman exec %CONTAINER_NAME% curl --fail --silent --connect-timeout 3 --max-time 5 "http://%%a:11434/api/version" 2>nul
     echo.
 )
 echo.
 
 echo  --- Test Ollama pe host.containers.internal ---
-podman exec %CONTAINER_NAME% curl -s --connect-timeout 3 "http://host.containers.internal:11434/api/version" 2>nul
+podman exec %CONTAINER_NAME% curl --fail --silent --connect-timeout 3 --max-time 5 "http://host.containers.internal:11434/api/version" 2>nul
 echo.
 
 echo  --- Rezolvare DNS ---
@@ -615,14 +538,11 @@ podman exec %CONTAINER_NAME% getent hosts host.containers.internal 2>nul
 podman exec %CONTAINER_NAME% getent hosts host.docker.internal 2>nul
 echo.
 
-:: Detect port and try web API diagnostics
-set "DIAG_PORT=%DEFAULT_PORT%"
-for /f "tokens=*" %%a in ('podman port %CONTAINER_NAME% 8080 2^>nul') do (
-    for /f "tokens=2 delims=:" %%b in ("%%a") do set "DIAG_PORT=%%b"
-)
+:: Diagnostics authenticate inside the container.
+echo.
 
 echo  --- Diagnosticare via API web ---
-curl -s "http://localhost:!DIAG_PORT!/api/network-diag" 2>nul
+podman exec %CONTAINER_NAME% python3 /app/manager_client.py network
 echo.
 echo.
 

@@ -152,6 +152,7 @@
   </div>
 </div>
 
+<script src="/static/common.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 
@@ -181,6 +182,7 @@ async function loadLogs() {
     const level = $('logLevelFilter') ? $('logLevelFilter').value : '';
     const resp = await fetch(`/api/logs?limit=500&level=${level}`);
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
     const panel = $('logsPanel');
     $('logCount').textContent = data.logs.length + ' / ' + data.total + ' loguri';
 
@@ -201,7 +203,7 @@ async function loadLogs() {
       panel.scrollTop = panel.scrollHeight;
     }
   } catch (e) {
-    $('logsPanel').innerHTML = '<div style="color:var(--red);padding:20px;text-align:center">Eroare: ' + e.message + '</div>';
+    $('logsPanel').innerHTML = '<div style="color:var(--red);padding:20px;text-align:center">Eroare: ' + escHtml(e.message) + '</div>';
   }
 }
 
@@ -209,6 +211,7 @@ async function loadFiles() {
   try {
     const resp = await fetch('/api/files');
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
     const panel = $('filesPanel');
     $('filesCount').textContent = data.files.length + ' fisiere';
 
@@ -219,15 +222,23 @@ async function loadFiles() {
 
     panel.innerHTML = data.files.map(f =>
       `<div class="file-entry">`+
-      `<span class="file-category ${f.category}">${f.category}</span>`+
-      `<span style="flex:1;font-weight:500">${escHtml(f.name)}</span>`+
+      `<span class="file-category ${f.category === 'upload' ? 'upload' : 'output'}">${escHtml(f.category)}</span>`+
+      `<a class="file-download" style="flex:1;font-weight:500;color:var(--primary)">${escHtml(f.name)}</a>`+
       `<span style="color:var(--text3);font-size:12px">${fmtBytes(f.size)}</span>`+
       `<span style="color:var(--text3);font-size:12px">${f.modified.substring(0,19).replace('T',' ')}</span>`+
-      `<button class="btn btn-sm btn-danger" onclick="deleteFile('${f.category}','${escHtml(f.name)}')">&times;</button>`+
+      `<button class="btn btn-sm btn-danger" type="button" aria-label="Șterge fișierul">&times;</button>`+
       `</div>`
     ).join('');
+    panel.querySelectorAll('.file-entry').forEach((row, index) => {
+      const file = data.files[index];
+      const link = row.querySelector('.file-download');
+      link.href = '/api/files/' + encodeURIComponent(file.category) + '/' + encodeURIComponent(file.name);
+      link.download = file.name;
+      link.title = 'Descarcă fișierul';
+      row.querySelector('button').addEventListener('click', () => deleteFile(file.category, file.name));
+    });
   } catch (e) {
-    $('filesPanel').innerHTML = '<div style="color:var(--red);padding:20px;text-align:center">Eroare: ' + e.message + '</div>';
+    $('filesPanel').innerHTML = '<div style="color:var(--red);padding:20px;text-align:center">Eroare: ' + escHtml(e.message) + '</div>';
   }
 }
 
@@ -235,22 +246,23 @@ async function loadSystemInfo() {
   try {
     const resp = await fetch('/api/system-info');
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
     $('sysInfoPanel').innerHTML = `
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;font-size:13px">
-        <div><span style="color:var(--text3)">Platforma:</span><br><strong>${data.platform}</strong></div>
-        <div><span style="color:var(--text3)">Python:</span><br><strong>${data.python}</strong></div>
+        <div><span style="color:var(--text3)">Platforma:</span><br><strong>${escHtml(data.platform)}</strong></div>
+        <div><span style="color:var(--text3)">Python:</span><br><strong>${escHtml(data.python)}</strong></div>
         <div><span style="color:var(--text3)">CPU:</span><br><strong>${data.cpu_count} cores</strong></div>
         <div><span style="color:var(--text3)">RAM total:</span><br><strong>${data.ram_total_gb} GB</strong></div>
         <div><span style="color:var(--text3)">Server pornit la:</span><br><strong>${data.server_start.substring(0,19).replace('T',' ')}</strong></div>
         <div><span style="color:var(--text3)">Uptime:</span><br><strong>${fmtDuration(data.uptime_seconds)}</strong></div>
-        <div><span style="color:var(--text3)">Director uploads:</span><br><strong>${data.upload_dir}</strong></div>
-        <div><span style="color:var(--text3)">Director outputs:</span><br><strong>${data.output_dir}</strong></div>
+        <div><span style="color:var(--text3)">Director uploads:</span><br><strong>${escHtml(data.upload_dir)}</strong></div>
+        <div><span style="color:var(--text3)">Director outputs:</span><br><strong>${escHtml(data.output_dir)}</strong></div>
         <div><span style="color:var(--text3)">Total job-uri:</span><br><strong>${data.total_jobs}</strong></div>
         <div><span style="color:var(--text3)">Job-uri active:</span><br><strong>${data.active_jobs}</strong></div>
-        <div><span style="color:var(--text3)">URL Ollama:</span><br><strong>${data.ollama_url}</strong></div>
+        <div><span style="color:var(--text3)">URL Ollama:</span><br><strong>${escHtml(data.ollama_url)}</strong></div>
       </div>`;
   } catch (e) {
-    $('sysInfoPanel').innerHTML = '<div style="color:var(--red);font-size:13px">Eroare: ' + e.message + '</div>';
+    $('sysInfoPanel').innerHTML = '<div style="color:var(--red);font-size:13px">Eroare: ' + escHtml(e.message) + '</div>';
   }
 }
 
@@ -259,6 +271,7 @@ async function stopAllJobs() {
   try {
     const resp = await fetch('/api/jobs/stop-all', {method:'POST'});
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
     alert(data.stopped + ' job-uri oprite');
   } catch (e) {
     alert('Eroare: ' + e.message);
@@ -268,7 +281,11 @@ async function stopAllJobs() {
 async function deleteFile(category, filename) {
   if (!confirm('Stergeti fisierul ' + filename + '?')) return;
   try {
-    await fetch(`/api/files/${category}/${encodeURIComponent(filename)}`, {method:'DELETE'});
+    const resp = await fetch(`/api/files/${encodeURIComponent(category)}/${encodeURIComponent(filename)}`, {method:'DELETE'});
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.detail || resp.status);
+    }
     loadFiles();
   } catch (e) {
     alert('Eroare: ' + e.message);
@@ -280,6 +297,7 @@ async function cleanupFiles() {
   try {
     const resp = await fetch('/api/files/cleanup', {method:'POST'});
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
     alert(data.deleted + ' fisiere sterse');
     loadFiles();
   } catch (e) {
@@ -293,9 +311,10 @@ async function runNetDiag() {
   try {
     const resp = await fetch('/api/network-diag');
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
     let html = '<div style="font-size:13px">';
-    html += '<div style="margin-bottom:12px"><strong>Container IP:</strong> ' + (data.container_ip || 'N/A') + '</div>';
-    html += '<div style="margin-bottom:12px"><strong>Gateway:</strong> ' + (data.gateway_ip || 'N/A') + '</div>';
+    html += '<div style="margin-bottom:12px"><strong>Container IP:</strong> ' + escHtml(data.container_ip || 'N/A') + '</div>';
+    html += '<div style="margin-bottom:12px"><strong>Gateway:</strong> ' + escHtml(data.gateway_ip || 'N/A') + '</div>';
     html += '<div style="margin-bottom:12px"><strong>Ollama URL configurat:</strong> <code>' + escHtml(data.ollama_url) + '</code></div>';
     if (data.routes) {
       html += '<div style="margin-bottom:12px"><strong>Rute:</strong><br><pre style="background:var(--bg);padding:8px;border-radius:4px;font-size:11px;overflow-x:auto">' + escHtml(data.routes) + '</pre></div>';
@@ -308,9 +327,9 @@ async function runNetDiag() {
       html += '<tr>';
       html += '<td><code>' + escHtml(t.host) + '</code></td>';
       html += '<td>' + pingOk + '</td>';
-      html += '<td>' + (t.resolved_ip || '-') + '</td>';
+      html += '<td>' + escHtml(t.resolved_ip || '-') + '</td>';
       html += '<td>' + ollamaOk + '</td>';
-      html += '<td>' + (t.ollama_version || '-') + '</td>';
+      html += '<td>' + escHtml(t.ollama_version || '-') + '</td>';
       html += '</tr>';
     }
     html += '</tbody></table>';
@@ -323,7 +342,7 @@ async function runNetDiag() {
     html += '</div></div>';
     panel.innerHTML = html;
   } catch (e) {
-    panel.innerHTML = '<div style="color:var(--red);font-size:13px">Eroare: ' + e.message + '</div>';
+    panel.innerHTML = '<div style="color:var(--red);font-size:13px">Eroare: ' + escHtml(e.message) + '</div>';
   }
 }
 

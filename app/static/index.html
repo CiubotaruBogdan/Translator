@@ -978,6 +978,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
 <!-- Toast container (top right) -->
 <div class="toast-container" id="toastContainer"></div>
 
+<script src="/static/common.js"></script>
 <script>
 // ============================================================
 // LANGUAGES - All Argos Translate supported languages
@@ -1009,7 +1010,10 @@ let LANGS = ALL_LANGS;
 // ============================================================
 let activeJobs = {};  // jobId -> {sse, data}
 let ws = null;
+let wsPingTimer = null;
+let wsReconnectTimer = null;
 let selectedFiles = [];  // Array of File objects
+let uploadsInProgress = false;
 let jobsPageSSE = {};   // jobId -> {sse, data} for jobs page live tracking
 const openJobPanels = new Set();  // track expanded job panels on jobs page
 
@@ -1029,8 +1033,9 @@ function populateLanguages(langs) {
     src.add(new Option(l.n, l.c));
     tgt.add(new Option(l.n, l.c));
   });
-  src.value = savedSrc;
-  tgt.value = savedTgt;
+  const codes = new Set(langs.map(l => l.c));
+  src.value = codes.has(savedSrc) ? savedSrc : (codes.has('ro') ? 'ro' : (langs[0]?.c || ''));
+  tgt.value = codes.has(savedTgt) ? savedTgt : (codes.has('en') ? 'en' : (langs.find(l => l.c !== src.value)?.c || langs[0]?.c || ''));
 
   // Text translate dropdowns
   const ttSrc = $('ttSourceLang'), ttTgt = $('ttTargetLang');
@@ -1043,8 +1048,8 @@ function populateLanguages(langs) {
       ttSrc.add(new Option(l.n, l.c));
       ttTgt.add(new Option(l.n, l.c));
     });
-    ttSrc.value = savedTTSrc;
-    ttTgt.value = savedTTTgt;
+    ttSrc.value = codes.has(savedTTSrc) ? savedTTSrc : src.value;
+    ttTgt.value = codes.has(savedTTTgt) ? savedTTTgt : tgt.value;
   }
 }
 
@@ -1060,6 +1065,9 @@ function init() {
     if (info.ollama_url && !localStorage.getItem('ollamaUrl')) {
       $('ollamaUrl').value = info.ollama_url;
       refreshModels();
+    }
+    if (info.libretranslate_url && !localStorage.getItem('libreUrl')) {
+      $('libreUrl').value = info.libretranslate_url;
     }
     // Update language list based on engine
     if (info.installed_languages && info.installed_languages.length) {
@@ -1137,6 +1145,7 @@ function onEngineChange() {
   } else {
     // LibreTranslate: only show installed languages
     fetch('/api/system-info').then(r => r.json()).then(info => {
+      if ($('engineSelect').value !== 'libretranslate') return;
       if (info.installed_languages && info.installed_languages.length) {
         LANGS = ALL_LANGS.filter(l => info.installed_languages.includes(l.c));
         populateLanguages(LANGS);
@@ -1152,6 +1161,7 @@ async function testLibreConnection() {
   try {
     const resp = await fetch(`/api/libretranslate?url=${encodeURIComponent(url)}`);
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
     if (data.connected) {
       toast(`LibreTranslate conectat! ${data.languages.length} limbi disponibile.`, 'success');
       $('libreStatusBadge').className = 'badge green';
@@ -1178,7 +1188,7 @@ function renderLibreLanguages(languages) {
   }
   $('libreLanguagesList').innerHTML = `<table class="table-simple">
     <thead><tr><th>Cod</th><th>Limbă</th></tr></thead>
-    <tbody>${languages.map(l => `<tr><td><code>${l.code}</code></td><td>${l.name}</td></tr>`).join('')}</tbody>
+    <tbody>${languages.map(l => `<tr><td><code>${escRev(l.code)}</code></td><td>${escRev(l.name)}</td></tr>`).join('')}</tbody>
   </table>`;
 }
 
@@ -1276,11 +1286,17 @@ function fmtBytes(b) {
 // TRANSLATION (multiple files)
 // ============================================================
 async function startTranslation() {
+  if (uploadsInProgress) return;
   if (!selectedFiles.length) {
     toast('Încărcați cel puțin un document', 'error');
     return;
   }
 
+  const sourceLang = $('sourceLang').value, targetLang = $('targetLang').value;
+  if (!sourceLang || !targetLang) {
+    toast('Selectează limbile sursă și destinație înainte de traducere.', 'error');
+    return;
+  }
   // Save settings
   saveSettings();
 
@@ -1291,16 +1307,17 @@ async function startTranslation() {
   const concurrency = parseInt($('concurrency').value) || 3;
   const numCtx = parseInt($('numCtx').value) || 2048;
 
+  uploadsInProgress = true;
   $('translateBtn').disabled = true;
   $('translateBtn').innerHTML = '<span class="spinner"></span> Se trimite...';
 
-  let filesToSend = [...selectedFiles];
+  const filesToSend = [...selectedFiles];
 
   let submitted = 0;
   for (const file of filesToSend) {
     const formData = new FormData();
-    formData.append('source_lang', $('sourceLang').value);
-    formData.append('target_lang', $('targetLang').value);
+    formData.append('source_lang', sourceLang);
+    formData.append('target_lang', targetLang);
     formData.append('model', model);
     formData.append('ollama_url', ollamaUrl || '');  // empty = server uses auto-detected URL
     formData.append('concurrency', concurrency);
@@ -1322,6 +1339,10 @@ async function startTranslation() {
       }
       const data = await resp.json();
       submitted++;
+      // Remove only this accepted File object. New arrivals and failed uploads
+      // remain queued, even if they have the same name as an earlier file.
+      selectedFiles = selectedFiles.filter(queued => queued !== file);
+      renderFileList();
 
       // Track this job
       trackJob(data.job_id, file.name);
@@ -1330,9 +1351,8 @@ async function startTranslation() {
     }
   }
 
-  // Reset upload zone
-  selectedFiles = [];
   renderFileList();
+  uploadsInProgress = false;
 
   $('translateBtn').disabled = false;
   $('translateBtn').innerHTML = '<svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg> Traduce documente';
@@ -1592,7 +1612,7 @@ async function refreshModels() {
         <thead><tr><th>Model</th><th>Dimensiune</th><th>Familie</th><th>Parametri</th></tr></thead>
         <tbody>${data.models.map(m => {
           const det = m.details || {};
-          return `<tr><td><strong>${m.name}</strong></td><td>${fmtBytes(m.size)}</td><td>${det.family || '-'}</td><td>${det.parameter_size || '-'}</td></tr>`;
+          return `<tr><td><strong>${escRev(m.name)}</strong></td><td>${fmtBytes(m.size)}</td><td>${escRev(det.family || '-')}</td><td>${escRev(det.parameter_size || '-')}</td></tr>`;
         }).join('')}</tbody>
       </table>`;
     } else if (data.connected) {
@@ -1820,27 +1840,13 @@ function stopReviewPolling() {
 
 function escRev(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
 
-// Robust clipboard copy: the Async Clipboard API is unavailable on plain HTTP
-// (non-secure contexts), so fall back to a temporary textarea + execCommand.
-function fallbackCopy(text, okMsg) {
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-    document.body.appendChild(ta); ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-    toast(okMsg, 'success');
-  } catch (e) { toast('Nu s-a putut copia', 'error'); }
-}
-function copyToClipboard(text, okMsg = 'Copiat') {
+// Report clipboard failures instead of losing the user's text on LAN HTTP.
+async function copyToClipboard(text, okMsg = 'Copiat') {
   if (text == null) return;
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text)
-      .then(() => toast(okMsg, 'success'))
-      .catch(() => fallbackCopy(text, okMsg));
-  } else {
-    fallbackCopy(text, okMsg);
-  }
+  try {
+    await copyPlainText(text);
+    toast(okMsg, 'success');
+  } catch (e) { toast('Nu s-a putut copia: ' + e.message, 'error'); }
 }
 
 function ensureReviewModal() {
@@ -1921,7 +1927,7 @@ function ensureReviewModal() {
         <div id="rvList"><div class="rv-empty">Apasă „Pornește verificarea" pentru a analiza traducerea segment cu segment.</div></div>
       </div>
       <div class="rv-foot" id="rvFoot" style="display:none;border-top:1px solid var(--border);padding:10px 18px;align-items:center;gap:10px;flex-wrap:wrap">
-        <label style="font-size:12px;display:flex;align-items:center;gap:5px"><input type="checkbox" id="rvSelAll" onchange="rvToggleAll(this.checked)"> Selectează toate propunerile</label>
+        <label id="rvSelectionControls" style="font-size:12px;display:flex;align-items:center;gap:5px"><input type="checkbox" id="rvSelAll" onchange="rvToggleAll(this.checked)"> Selectează toate propunerile</label>
         <span id="rvSelCount" style="font-size:12px;color:var(--text3)"></span>
         <button class="btn btn-sm btn-primary" style="margin-left:auto" id="rvApplyBtn" onclick="applyReview()">Generează document revizuit</button>
         <a id="rvDownloadLink" href="#" style="display:none;font-size:13px;color:var(--green);text-decoration:none;font-weight:600">⬇ Descarcă documentul revizuit</a>
@@ -2085,8 +2091,9 @@ function applyReviewData(data) {
     reviewState.selInit = true;
   }
   // Show existing revised-document link if already generated
+  const dl = $('rvDownloadLink');
+  dl.style.display = data.revised_output_file ? '' : 'none';
   if (data.revised_output_file) {
-    const dl = $('rvDownloadLink');
     dl.href = `/api/jobs/${reviewState.jobId}/review/download`;
     dl.style.display = '';
   }
@@ -2170,8 +2177,13 @@ function updateApplyBar() {
   if (!foot) return;
   const applicable = rvApplicableIndices();
   const running = _reviewData.status === 'running';
-  if (!applicable.size) { foot.style.display = 'none'; return; }
-  foot.style.display = 'flex';
+  const hasActions = applicable.size > 0;
+  const canExport = !running && (_reviewData.results || []).length > 0;
+  const canDownload = !running && !!_reviewData.revised_output_file;
+  foot.style.display = hasActions || canExport || canDownload ? 'flex' : 'none';
+  $('rvSelectionControls').style.display = hasActions ? 'flex' : 'none';
+  $('rvSelCount').style.display = hasActions ? '' : 'none';
+  $('rvApplyBtn').style.display = hasActions ? '' : 'none';
   const selCount = [...applicable].filter(i => reviewState.selected.has(i)).length;
   $('rvSelCount').textContent = `${selCount} din ${applicable.size} propuneri selectate`;
   $('rvSelAll').checked = selCount === applicable.size && selCount > 0;
@@ -2214,6 +2226,7 @@ async function applyReview() {
     if (!resp.ok) { const err = await resp.json().catch(()=>({})); throw new Error(err.detail || resp.status); }
     const data = await resp.json();
     if (requestId !== reviewState.requestId) return;
+    _reviewData.revised_output_file = data.filename;
     toast(`Document revizuit generat (${data.applied} propuneri aplicate)`, 'success');
     const dl = $('rvDownloadLink');
     dl.href = `/api/jobs/${jobId}/review/download`;
@@ -2247,22 +2260,46 @@ async function exportReviewHtml() {
 // DASHBOARD WEBSOCKET
 // ============================================================
 function connectWS() {
+  clearTimeout(wsReconnectTimer);
+  clearInterval(wsPingTimer);
+  wsReconnectTimer = wsPingTimer = null;
+  if (ws && ws.readyState < WebSocket.CLOSING) {
+    ws.onclose = null;
+    ws.close();
+  }
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/ws/dashboard`);
-
-  ws.onmessage = (e) => {
+  const socket = new WebSocket(`${proto}//${location.host}/ws/dashboard`);
+  ws = socket;
+  socket.onmessage = (e) => {
+    if (socket !== ws) return;
     const msg = JSON.parse(e.data);
     if (msg.type === 'init' || msg.type === 'update') updateDashboard(msg.data);
     if (msg.type === 'job_update') loadJobs();
   };
-
-  ws.onclose = () => { setTimeout(connectWS, 3000); };
-  ws.onerror = () => {};
-
-  setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
-  }, 20000);
+  socket.onopen = () => {
+    if (socket !== ws) return;
+    clearInterval(wsPingTimer);
+    wsPingTimer = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) socket.send('ping');
+    }, 20000);
+  };
+  socket.onclose = () => {
+    if (socket !== ws) return;
+    clearInterval(wsPingTimer);
+    wsPingTimer = null;
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = setTimeout(connectWS, 3000);
+  };
+  socket.onerror = () => {};
 }
+window.addEventListener('pagehide', () => {
+  clearInterval(wsPingTimer);
+  clearTimeout(wsReconnectTimer);
+  if (ws) { ws.onclose = null; ws.close(); }
+});
+window.addEventListener('pageshow', event => {
+  if (event.persisted) connectWS();
+});
 
 function updateDashboard(d) {
   $('dashOnline').textContent = d.connected_clients || 0;
@@ -2291,7 +2328,7 @@ function updateDashboard(d) {
     $('dashGpuModels').innerHTML = gpu.map(m =>
       `<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)">
         <span class="badge green"><span class="badge-dot"></span> Loaded</span>
-        <strong>${m.model}</strong>
+        <strong>${escRev(m.model)}</strong>
         <span style="font-size:12px;color:var(--text3)">${fmtBytes(m.size)} total, ${fmtBytes(m.vram)} VRAM</span>
       </div>`
     ).join('');
@@ -2337,7 +2374,7 @@ function updateDashboard(d) {
 
   if (ollama.models && ollama.models.length) {
     $('dashModelsList').innerHTML = `<table class="table-simple"><thead><tr><th>Model</th><th>Dimensiune</th><th>Familie</th></tr></thead><tbody>` +
-      ollama.models.map(m => `<tr><td><strong>${m.name}</strong></td><td>${fmtBytes(m.size)}</td><td>${(m.details||{}).family || '-'}</td></tr>`).join('') +
+      ollama.models.map(m => `<tr><td><strong>${escRev(m.name)}</strong></td><td>${fmtBytes(m.size)}</td><td>${escRev((m.details||{}).family || '-')}</td></tr>`).join('') +
       '</tbody></table>';
   } else {
     $('dashModelsList').innerHTML = '<div style="color:var(--text3);font-size:13px">Niciun model instalat</div>';
@@ -2428,19 +2465,7 @@ function updateTTEngineBadge() {
 function copyTTOutput() {
   const el = $('ttOutput');
   if (!el || el.classList.contains('placeholder')) return;
-  const text = el.textContent || el.innerText;
-  navigator.clipboard.writeText(text).then(() => {
-    toast('Traducerea a fost copiată!', 'success');
-  }).catch(() => {
-    // Fallback
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-    toast('Traducerea a fost copiată!', 'success');
-  });
+  copyToClipboard(el.textContent, 'Traducerea a fost copiată!');
 }
 
 async function translateText() {
@@ -2452,6 +2477,10 @@ async function translateText() {
 
   const srcLang = $('ttSourceLang').value;
   const tgtLang = $('ttTargetLang').value;
+  if (!srcLang || !tgtLang) {
+    toast('Selectează limbile sursă și destinație înainte de traducere.', 'error');
+    return;
+  }
   const engine = ($('engineSelect') ? $('engineSelect').value : null) || localStorage.getItem('engine') || 'ollama';
   const model = ($('customModel') ? $('customModel').value.trim() : '') || ($('modelSelect') ? $('modelSelect').value : '') || 'gemma3:4b';
   const ollamaUrl = ($('ollamaUrl') ? $('ollamaUrl').value.trim() : '') || '';
@@ -2523,6 +2552,7 @@ async function testConnection() {
   try {
     const resp = await fetch(`/api/ollama${queryUrl}`);
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.status);
     if (data.connected) {
       toast(`Conectat! ${data.models.length} modele găsite.`, 'success');
       refreshModels();
@@ -2668,12 +2698,7 @@ function downloadOCR() {
 
 function copyOCRText() {
   const text = $('ocrResultText').textContent;
-  if (!text) return;
-  navigator.clipboard.writeText(text).then(() => {
-    toast('Text copiat!', 'success');
-  }).catch(() => {
-    toast('Nu s-a putut copia', 'error');
-  });
+  if (text) copyToClipboard(text, 'Text copiat!');
 }
 
 // ============================================================

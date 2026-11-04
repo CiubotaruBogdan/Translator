@@ -270,7 +270,7 @@ if errorlevel 1 (
     podman images %IMAGE_NAME%
     echo.
     echo  Limbi instalate in imagine:
-    podman run --rm %IMAGE_NAME% printenv INSTALLED_LANGUAGES 2>nul
+    podman run --rm --entrypoint cat %IMAGE_NAME% /app/installed_languages.txt
 )
 echo.
 call :SHOW_TAR_INFO
@@ -320,6 +320,13 @@ if errorlevel 1 (
     echo  EROARE: imaginea %IMAGE_NAME% nu exista. Construieste-o intai (optiunea 1 sau 3).
     exit /b 1
 )
+echo  Se verifica traducerea cu reteaua oprita inainte de export...
+podman run --rm --network none --entrypoint python3 %IMAGE_NAME% /opt/translator/install_languages.py --verify-only
+if errorlevel 1 (
+    echo  EROARE: Verificarea offline a esuat. Exportul a fost anulat.
+    exit /b 1
+)
+echo.
 echo  Se exporta %IMAGE_NAME% in %TAR_NAME% ...
 echo  (Poate dura cateva minute)
 echo.
@@ -336,6 +343,7 @@ echo.
 echo  Copiaza pe stick USB catre statia offline:
 echo    - %TAR_NAME%
 echo    - traducator_manager.bat
+echo    - configure_access.ps1
 echo    - TUTORIAL_DOCKER.md
 exit /b 0
 

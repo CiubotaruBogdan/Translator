@@ -35,7 +35,10 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Web
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
-from starlette.middleware.cors import CORSMiddleware
+try:
+    from .security import SharedPasswordMiddleware, configured_password, approved_engine_url, bounded_filename
+except ImportError:  # python server.py inside the container
+    from security import SharedPasswordMiddleware, configured_password, approved_engine_url, bounded_filename
 
 import docx
 from docx.oxml.ns import qn
@@ -84,6 +87,28 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 DEFAULT_CONCURRENCY = 3
 DEFAULT_NUM_CTX = 4096
 DEFAULT_KEEP_ALIVE = "30m"
+
+
+def validate_engine_url(url: str, kind: str = "ollama") -> str:
+    default = DEFAULT_LIBRETRANSLATE_URL if kind == "libretranslate" else DEFAULT_OLLAMA_URL
+    try:
+        return approved_engine_url(url or default, [DEFAULT_OLLAMA_URL, DEFAULT_LIBRETRANSLATE_URL])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def upload_filename(filename: str) -> str:
+    try:
+        return bounded_filename(filename)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def validate_languages(source: str, target: str):
+    if source not in LANG_EN and source != "auto":
+        raise HTTPException(400, "Limba sursă este invalidă.")
+    if target not in LANG_EN:
+        raise HTTPException(400, "Limba țintă este invalidă.")
 
 LANG_EN = {
     'ro': 'Romanian', 'en': 'English', 'fr': 'French', 'de': 'German',
@@ -151,7 +176,7 @@ app_logger.setLevel(logging.DEBUG)
 # ============================================================
 
 app = FastAPI(title="Offline Document Translator")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(SharedPasswordMiddleware)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 @app.get("/logs.html")
@@ -191,6 +216,7 @@ class TranslationJob:
                  original_prompt=False):
         self.job_id = job_id
         self.filename = filename
+        self.display_filename = filename
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.model = model
@@ -261,7 +287,7 @@ class TranslationJob:
                 pass
         return {
             "job_id": self.job_id,
-            "filename": self.filename,
+            "filename": self.display_filename,
             "kind": self.kind,
             "source_lang": self.source_lang,
             "target_lang": self.target_lang,
@@ -307,6 +333,115 @@ jobs: dict[str, TranslationJob] = {}
 sse_queues: dict[str, list[asyncio.Queue]] = {}
 connected_clients: dict[str, dict] = {}
 server_start_time = datetime.now()
+
+
+# Own asynchronous work so cancellation closes pending HTTP requests before files
+# are removed. Registries are process-local, like the job history itself.
+pipeline_tasks: dict[str, asyncio.Task] = {}
+review_tasks: dict[str, asyncio.Task] = {}
+_active_file_paths: dict[Path, int] = {}
+_file_activity_lock = threading.RLock()
+
+
+def _track_job_task(registry, job_id, coroutine):
+    task = asyncio.create_task(coroutine)
+    if task is not None:
+        registry[job_id] = task
+        def finished(done):
+            if registry.get(job_id) is done:
+                registry.pop(job_id, None)
+        task.add_done_callback(finished)
+    return task
+
+
+def start_pipeline(job):
+    if getattr(job, "deleting", False):
+        raise HTTPException(409, "Jobul este în curs de ștergere.")
+    return _track_job_task(pipeline_tasks, job.job_id, run_pipeline(job))
+
+
+async def _review_task(job, model, url, **kwargs):
+    try:
+        await run_review(job, model, url, **kwargs)
+    except asyncio.CancelledError:
+        job.review_cancel = True
+        job.review_status = "cancelled"
+        job.review_error = None
+        job.add_event("warning", "Verificare anulată")
+        emit(job)
+        raise
+
+
+def start_review(job, model, url, **kwargs):
+    if getattr(job, "deleting", False):
+        raise HTTPException(409, "Jobul este în curs de ștergere.")
+    return _track_job_task(review_tasks, job.job_id,
+                           _review_task(job, model, url, **kwargs))
+
+
+async def cancel_job_tasks(job, *, translation=True, review=True):
+    tasks = []
+    if translation:
+        job.cancelled = True
+        task = pipeline_tasks.get(job.job_id)
+        if task is not None and not task.done():
+            task.cancel()
+            tasks.append(task)
+    if review:
+        job.review_cancel = True
+        task = review_tasks.get(job.job_id)
+        if task is not None and not task.done():
+            task.cancel()
+            tasks.append(task)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    # Cancellation can happen before a newly scheduled coroutine executes.
+    if translation and job.status in (JobStatus.QUEUED, JobStatus.EXTRACTING,
+            JobStatus.CHUNKING, JobStatus.TRANSLATING, JobStatus.ASSEMBLING):
+        job.status = JobStatus.CANCELLED
+        job.current_step = "Cancelled by user"
+        job.completed_at = datetime.now().isoformat()
+    if review and job.review_status == "running":
+        job.review_status = "cancelled"
+    emit(job)
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def file_lease(*paths):
+    """Protect staged OCR/document files while a request is using them."""
+    resolved = {Path(path).resolve() for path in paths}
+    with _file_activity_lock:
+        for path in resolved:
+            _active_file_paths[path] = _active_file_paths.get(path, 0) + 1
+    try:
+        yield
+    finally:
+        with _file_activity_lock:
+            for path in resolved:
+                remaining = _active_file_paths[path] - 1
+                if remaining:
+                    _active_file_paths[path] = remaining
+                else:
+                    _active_file_paths.pop(path)
+
+
+def is_file_active(path):
+    path = Path(path)
+    with _file_activity_lock:
+        if path.resolve() in _active_file_paths:
+            return True
+    for job in list(jobs.values()):
+        active = (job.status in (JobStatus.QUEUED, JobStatus.EXTRACTING,
+                  JobStatus.CHUNKING, JobStatus.TRANSLATING, JobStatus.ASSEMBLING)
+                  or job.review_status == "running"
+                  or any(task is not None and not task.done() for task in
+                         (pipeline_tasks.get(job.job_id), review_tasks.get(job.job_id))))
+        if active and path.name.startswith(job.job_id + "_"):
+            return True
+    return False
 
 # ============================================================
 # Prompt / Response history ("CMD" istoric)
@@ -393,7 +528,7 @@ async def get_system_stats():
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{DEFAULT_OLLAMA_URL}/api/ps",
-                                   timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                                   timeout=aiohttp.ClientTimeout(total=3), allow_redirects=False) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get("models"):
@@ -417,7 +552,7 @@ async def get_ollama_status(url=None):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{target_url}/api/tags",
-                                   timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                                   timeout=aiohttp.ClientTimeout(total=5), allow_redirects=False) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     models = [{"name": m.get("name",""), "size": m.get("size",0),
@@ -434,10 +569,11 @@ async def get_libretranslate_status(url=None):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{target_url}/languages",
-                                   timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                                   timeout=aiohttp.ClientTimeout(total=5), allow_redirects=False) as resp:
                 if resp.status == 200:
                     langs = await resp.json()
-                    return {"connected": True, "languages": len(langs), "url": target_url}
+                    if isinstance(langs, list) and langs and all(isinstance(entry, dict) and isinstance(entry.get("code"), str) for entry in langs):
+                        return {"connected": True, "languages": len(langs), "url": target_url}
     except:
         pass
     return {"connected": False, "languages": 0, "url": target_url}
@@ -512,6 +648,7 @@ async def dashboard_updater():
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(dashboard_updater())
+    schedule_daily_cleanup()
 
 # ============================================================
 # DOCX Format-Preserving Extraction
@@ -525,65 +662,79 @@ async def startup():
 INLINE_MARKER_RE = re.compile(r"⟦\d+⟧")  # ⟦n⟧
 
 
+def _paragraph_runs(para):
+    """Include hyperlink runs in reading order without flattening their XML."""
+    from docx.text.run import Run
+    return [Run(element, para) for element in para._p.xpath('./w:r | ./w:hyperlink/w:r')]
+
+
 def _run_format_signature(run):
-    """A hashable signature of a run's formatting used to group adjacent runs."""
     font = run.font
     try:
-        color = str(font.color.rgb) if (font.color is not None and font.color.type is not None) else None
+        color = str(font.color.rgb) if font.color is not None and font.color.type is not None else None
     except Exception:
         color = None
     try:
         size = font.size.pt if font.size is not None else None
     except Exception:
         size = None
-    return (run.bold, run.italic, run.underline, font.name, size, color)
+    parent = run._r.getparent()
+    hyperlink = tuple(sorted(parent.attrib.items())) if parent.tag == qn('w:hyperlink') else None
+    return (run.bold, run.italic, run.underline, font.name, size, color, hyperlink)
 
 
 def _paragraph_format_groups(para) -> list[dict]:
-    """
-    Group consecutive non-empty runs that share identical formatting.
-    Word frequently splits a single visual span into several runs, so merging
-    same-format runs makes inline-formatting preservation far more robust.
-    Returns a list of {sig, run_indices, text}.
-    """
     groups = []
-    for ri, run in enumerate(para.runs):
-        if run.text == "":
+    for ri, run in enumerate(_paragraph_runs(para)):
+        if not run.text:
             continue
         sig = _run_format_signature(run)
-        if groups and groups[-1]["sig"] == sig:
-            groups[-1]["run_indices"].append(ri)
-            groups[-1]["text"] += run.text
+        if groups and groups[-1]['sig'] == sig:
+            groups[-1]['run_indices'].append(ri)
+            groups[-1]['text'] += run.text
         else:
-            groups.append({"sig": sig, "run_indices": [ri], "text": run.text})
+            groups.append({'sig': sig, 'run_indices': [ri], 'text': run.text})
     return groups
 
 
-def extract_docx_segments(filepath: Path, tag_inline: bool = True) -> list[dict]:
-    """Extract body and table paragraphs with their exact DOCX locations.
+def _set_run_text(run, text):
+    """Replace textual children only; Run.text also deletes drawings/objects."""
+    from docx.text.run import Run
+    textual = {qn('w:t'), qn('w:tab'), qn('w:br'), qn('w:cr')}
+    def is_text(child):
+        return child.tag in textual and not (child.tag == qn('w:br') and child.get(qn('w:type')) in ('page', 'column'))
+    positions = [i for i, child in enumerate(run._r) if is_text(child)]
+    insert_at = positions[0] if positions else len(run._r)
+    for child in list(run._r):
+        if is_text(child):
+            run._r.remove(child)
+    scratch = Run(OxmlElement('w:r'), run._parent)
+    scratch.text = text
+    for offset, child in enumerate(list(scratch._r)):
+        run._r.insert(insert_at + offset, child)
 
-    Merged cells are visited once, and nested tables retain their cell path.
-    Each paragraph keeps its own runs and inline-formatting markers.
+
+def extract_docx_segments(filepath: Path, tag_inline: bool = True) -> list[dict]:
+    """Record exact locations for body, tables, headers and footers.
+
+    A merged cell or linked header/footer is visited once. Hyperlink text and
+    each cell paragraph retain their own formatting boundaries.
     """
-    doc = docx.Document(str(filepath))
+    document = docx.Document(str(filepath))
     segments = []
 
     def add_paragraph(para, location):
-        full_text = para.text.strip()
+        groups = _paragraph_format_groups(para)
+        full_text = ''.join(group['text'] for group in groups).strip()
         if not full_text:
             return
-        groups = _paragraph_format_groups(para)
         multi_run = tag_inline and len(groups) > 1
-        text = ("".join(f"⟦{i}⟧{g['text']}" for i, g in enumerate(groups))
+        text = (''.join(f"⟦{i}⟧{group['text']}" for i, group in enumerate(groups))
                 if multi_run else full_text)
-        segments.append({"index": len(segments), "text": text,
-                         "char_count": len(full_text), "multi_run": multi_run,
-                         **location})
+        segments.append({'index': len(segments), 'text': text, 'char_count': len(full_text),
+                         'multi_run': multi_run, **location})
 
-    for pi, para in enumerate(doc.paragraphs):
-        add_paragraph(para, {"type": "paragraph", "para_index": pi})
-
-    def visit_table(table, table_index, table_path):
+    def visit_table(table, table_index, table_path, story):
         seen_cells = set()
         for ri, row in enumerate(table.rows):
             for ci, cell in enumerate(row.cells):
@@ -591,244 +742,314 @@ def extract_docx_segments(filepath: Path, tag_inline: bool = True) -> list[dict]
                     continue
                 seen_cells.add(cell._tc)
                 for pi, para in enumerate(cell.paragraphs):
-                    add_paragraph(para, {
-                        "type": "table_cell", "table_index": table_index,
-                        "table_path": table_path, "row_index": ri,
-                        "cell_index": ci, "cell_para_index": pi,
-                    })
-                for nested_index, nested in enumerate(cell.tables):
-                    visit_table(nested, table_index,
-                                table_path + [(ri, ci, nested_index)])
+                    add_paragraph(para, {'type': 'table_cell', 'table_index': table_index,
+                                        'table_path': table_path, 'row_index': ri,
+                                        'cell_index': ci, 'cell_para_index': pi, **story})
+                for ni, nested in enumerate(cell.tables):
+                    visit_table(nested, table_index, table_path + [(ri, ci, ni)], story)
 
-    for ti, table in enumerate(doc.tables):
-        visit_table(table, ti, [])
+    def visit_story(container, story):
+        for pi, para in enumerate(container.paragraphs):
+            add_paragraph(para, {'type': 'paragraph', 'para_index': pi, **story})
+        for ti, table in enumerate(container.tables):
+            visit_table(table, ti, [], story)
+
+    visit_story(document, {})
+    seen_stories = set()
+    for si, section in enumerate(document.sections):
+        for kind in ('header', 'first_page_header', 'even_page_header',
+                     'footer', 'first_page_footer', 'even_page_footer'):
+            container = getattr(section, kind)
+            # Do not create absent parts just by inspecting the document.
+            if not container._has_definition:
+                continue
+            if container.part.partname in seen_stories:
+                continue
+            seen_stories.add(container.part.partname)
+            visit_story(container, {'story': kind, 'section_index': si})
     return segments
+
+
+def align_review_segments(source_texts, source_segments, target_texts, target_segments):
+    """Align each DOCX story separately; unmatched target content stays intact."""
+    if source_segments is None or target_segments is None:
+        n = min(len(source_texts), len(target_texts))
+        return source_texts[:n], n, len(source_texts) != len(target_texts)
+    source_groups = defaultdict(list)
+    target_groups = defaultdict(list)
+    for seg in source_segments:
+        source_groups[(seg.get('story', 'body'), seg.get('section_index', 0))].append(seg)
+    for seg in target_segments:
+        target_groups[(seg.get('story', 'body'), seg.get('section_index', 0))].append(seg)
+    aligned = [''] * len(target_texts)
+    paired = 0
+    mismatch = False
+    for key in source_groups.keys() | target_groups.keys():
+        src = source_groups[key]
+        tgt = target_groups[key]
+        mismatch |= len(src) != len(tgt)
+        for original, translated in zip(src, tgt):
+            aligned[translated['index']] = source_texts[original['index']]
+            paired += 1
+    return aligned, paired, mismatch
 
 
 def apply_translations_to_docx(filepath: Path, segments: list[dict],
                                translations: list[str], output_path: Path,
                                allow_empty: bool = False):
-    """Replace body/table paragraph text without rebuilding document structure.
-
-    None means leave the segment untouched. Empty strings are accepted only for
-    explicit review edits; a missing machine translation must not erase text.
-    """
-    doc = docx.Document(str(filepath))
+    document = docx.Document(str(filepath))
     for seg, trans in zip(segments, translations):
-        if trans is None or (not trans and not allow_empty) or trans.startswith("[TRANSLATION ERROR"):
+        if trans is None or (not trans and not allow_empty) or trans.startswith('[TRANSLATION ERROR'):
             continue
-        if seg["type"] == "paragraph":
-            para = doc.paragraphs[seg["para_index"]]
-        elif seg["type"] == "table_cell":
-            table = doc.tables[seg["table_index"]]
-            for row_index, cell_index, nested_index in seg.get("table_path", []):
-                table = table.rows[row_index].cells[cell_index].tables[nested_index]
-            cell = table.rows[seg["row_index"]].cells[seg["cell_index"]]
-            para = cell.paragraphs[seg.get("cell_para_index", 0)]
+        container = (getattr(document.sections[seg['section_index']], seg['story'])
+                     if seg.get('story') else document)
+        if seg['type'] == 'paragraph':
+            para = container.paragraphs[seg['para_index']]
+        elif seg['type'] == 'table_cell':
+            table = container.tables[seg['table_index']]
+            for ri, ci, ni in seg.get('table_path', []):
+                table = table.rows[ri].cells[ci].tables[ni]
+            para = table.rows[seg['row_index']].cells[seg['cell_index']].paragraphs[seg.get('cell_para_index', 0)]
         else:
             continue
-        _apply_paragraph_translation(para, trans, seg.get("multi_run", False))
-    doc.save(str(output_path))
+        _apply_paragraph_translation(para, trans, seg.get('multi_run', False))
+    document.save(str(output_path))
 
 
 def _apply_paragraph_translation(para, new_text: str, multi_run: bool):
-    """
-    Reinsert translated text into a paragraph.
-
-    For paragraphs that had mixed inline formatting (multi_run), the text was
-    sent with ⟦n⟧ markers. We split the translation back on those markers and
-    drop each piece into the matching run group, preserving bold/italic/color
-    in the middle of the paragraph. If the markers were not preserved by the
-    engine (wrong count), we fall back to the single-run strategy.
-    """
-    if multi_run:
-        groups = _paragraph_format_groups(para)
-        if len(groups) > 1:
-            parts = INLINE_MARKER_RE.split(new_text)
-            # Text before the first marker (usually empty) is not a group
-            if parts and parts[0].strip() == "":
-                parts = parts[1:]
-            if len(parts) == len(groups):
-                for g, part in zip(groups, parts):
-                    idxs = g["run_indices"]
-                    para.runs[idxs[0]].text = part
-                    for ri in idxs[1:]:
-                        para.runs[ri].text = ""
-                return
-            # Fall through to single-run strategy on mismatch
-
-    # Single-run strategy: strip any stray markers, put all text in the first
-    # run, clear the rest. Preserves the paragraph style + first run's format.
-    clean = INLINE_MARKER_RE.sub("", new_text)
+    runs = _paragraph_runs(para)
     groups = _paragraph_format_groups(para)
+    matches = list(INLINE_MARKER_RE.finditer(new_text)) if multi_run else []
+    marker_ids = [int(match.group()[1:-1]) for match in matches]
+    if (groups and matches and len(matches) == len(groups)
+            and set(marker_ids) == set(range(len(groups)))
+            and not new_text[:matches[0].start()].strip()):
+        pieces = [new_text[m.end():matches[i + 1].start() if i + 1 < len(matches) else len(new_text)]
+                  for i, m in enumerate(matches)]
+        if marker_ids == list(range(len(groups))):
+            for group, piece in zip(groups, pieces):
+                _set_run_text(runs[group['run_indices'][0]], piece)
+                for ri in group['run_indices'][1:]:
+                    _set_run_text(runs[ri], '')
+            return
+        # The translated word order can differ. Rebuild textual carriers in that
+        # order using the styles/link target identified by each marker; retain
+        # non-text XML (drawings, fields, objects) in the original paragraph.
+        from docx.text.run import Run
+        first = runs[groups[0]['run_indices'][0]]._r
+        while first.getparent() is not para._p:
+            first = first.getparent()
+        insertion = para._p.index(first)
+        carriers = []
+        for marker_id, piece in zip(marker_ids, pieces):
+            source = runs[groups[marker_id]['run_indices'][0]]
+            element = OxmlElement('w:r')
+            if source._r.rPr is not None:
+                element.append(copy.deepcopy(source._r.rPr))
+            Run(element, para).text = piece
+            parent = source._r.getparent()
+            if parent.tag == qn('w:hyperlink'):
+                link = OxmlElement('w:hyperlink')
+                for key, value in parent.attrib.items():
+                    link.set(key, value)
+                link.append(element)
+                element = link
+            carriers.append(element)
+        for run in runs:
+            _set_run_text(run, '')
+        for offset, element in enumerate(carriers):
+            para._p.insert(insertion + offset, element)
+        return
+
+    clean = INLINE_MARKER_RE.sub('', new_text)
     if groups:
-        first_idx = groups[0]["run_indices"][0]
-        para.runs[first_idx].text = clean
-        for g in groups:
-            for ri in g["run_indices"]:
-                if ri != first_idx:
-                    para.runs[ri].text = ""
-    elif para.runs:
-        para.runs[0].text = clean
-        for run in para.runs[1:]:
-            run.text = ""
+        first = groups[0]['run_indices'][0]
+        for ri, run in enumerate(runs):
+            _set_run_text(run, clean if ri == first else '')
+    elif runs:
+        _set_run_text(runs[0], clean)
     else:
-        para.text = clean
+        para.add_run(clean)
 
 
 def _replace_paragraph_text(para, new_text: str):
-    """
-    Replace text in a paragraph while preserving the formatting of the first run.
-    Used for table cells (single-run strategy).
-    """
-    runs = para.runs
-    if not runs:
-        # No runs - just set text directly
-        para.text = new_text
-        return
-
-    # Put translated text in first run
-    runs[0].text = new_text
-    # Clear all other runs
-    for run in runs[1:]:
-        run.text = ""
+    _apply_paragraph_translation(para, new_text, False)
 
 
 def _clear_paragraph(para):
-    """Remove all text from a paragraph while keeping the XML element."""
-    for run in para.runs:
-        run.text = ""
+    for run in _paragraph_runs(para):
+        _set_run_text(run, '')
 
 
-# ============================================================
-# Plain Text Extraction (PDF, TXT)
-# ============================================================
+def _page_requires_ocr(page):
+    text = (page.extract_text() or '').strip()
+    # A page number or a short digital heading does not turn a scanned page into
+    # a fully digital page. Inspect every page, including pages after the fifth.
+    image_area = sum(max(0, image['x1'] - image['x0']) * max(0, image['bottom'] - image['top'])
+                     for image in page.images)
+    return not text or (image_area > page.width * page.height * 0.5 and len(text) < 100)
+
 
 def pdf_has_selectable_text(filepath: Path) -> bool:
-    """Check if a PDF has selectable (digital) text or is a scanned image."""
-    total_chars = 0
+    """True only if every nonblank page can be handled without OCR."""
+    with pdfplumber.open(str(filepath)) as pdf:
+        return bool(pdf.pages) and all(not _page_requires_ocr(page) for page in pdf.pages)
+
+
+def _ocr_pdf_page(pdf_path: Path, page_number: int, lang: str):
+    if not TESSERACT_AVAILABLE:
+        raise RuntimeError('Tesseract OCR nu este disponibil pentru paginile scanate.')
+    from pdf2image import convert_from_path
+    images = convert_from_path(str(pdf_path), dpi=300, first_page=page_number,
+                               last_page=page_number, thread_count=1)
     try:
-        with pdfplumber.open(str(filepath)) as pdf:
-            for page in pdf.pages[:5]:  # Check first 5 pages
-                text = page.extract_text()
-                if text:
-                    total_chars += len(text.strip())
-    except:
-        pass
-    return total_chars > 50  # At least 50 chars = has text
+        return pytesseract.image_to_string(images[0], lang=lang).strip()
+    finally:
+        for image in images:
+            image.close()
 
 
 def convert_pdf_to_docx(pdf_path: Path, docx_path: Path):
-    """Convert PDF to DOCX using pdf2docx, preserving layout."""
     if not PDF2DOCX_AVAILABLE:
-        raise Exception("pdf2docx not installed. Cannot convert PDF with format preservation.")
-    cv = Pdf2DocxConverter(str(pdf_path))
-    cv.convert(str(docx_path), multi_processing=False)
-    cv.close()
+        raise RuntimeError('pdf2docx nu este instalat.')
+    converter = Pdf2DocxConverter(str(pdf_path))
+    try:
+        converter.convert(str(docx_path), multi_processing=False)
+    finally:
+        converter.close()
+
+
+def prepare_pdf_for_translation(pdf_path: Path, docx_path: Path, lang: str = 'eng+ron+fra'):
+    """Convert digital pages and OCR scanned pages, preserving their order.
+
+    Digital pages keep pdf2docx layout/media. Scanned pages become editable OCR
+    paragraphs, rather than leaving an untranslated full-page image in output.
+    """
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        scanned = [_page_requires_ocr(page) for page in pdf.pages]
+        dimensions = [(page.width, page.height) for page in pdf.pages]
+        image_pages = [bool(page.images) for page in pdf.pages]
+    if not scanned:
+        raise ValueError('PDF-ul nu conține pagini.')
+    if not any(scanned):
+        convert_pdf_to_docx(pdf_path, docx_path)
+        return
+    from docxcompose.composer import Composer
+    from docx.shared import Pt
+    with tempfile.TemporaryDirectory(prefix='translator-pdf-') as work:
+        composer = None
+        for index, needs_ocr in enumerate(scanned):
+            page_path = Path(work) / f'page-{index}.docx'
+            if needs_ocr:
+                page_doc = docx.Document()
+                page_doc.sections[0].page_width = Pt(dimensions[index][0])
+                page_doc.sections[0].page_height = Pt(dimensions[index][1])
+                text = _ocr_pdf_page(pdf_path, index + 1, lang)
+                if not text.strip() and image_pages[index]:
+                    raise ValueError(f'Nu s-a putut extrage text de pe pagina scanată {index + 1}. Verifică limba OCR și lizibilitatea scanării.')
+                for paragraph in re.split(r'\n\s*\n', text):
+                    if paragraph.strip():
+                        page_doc.add_paragraph(paragraph.strip())
+            else:
+                if not PDF2DOCX_AVAILABLE:
+                    raise RuntimeError('pdf2docx nu este instalat pentru paginile digitale.')
+                converter = Pdf2DocxConverter(str(pdf_path))
+                try:
+                    converter.convert(str(page_path), start=index, end=index + 1, multi_processing=False)
+                finally:
+                    converter.close()
+                page_doc = docx.Document(str(page_path))
+            if composer is None:
+                composer = Composer(page_doc)
+            else:
+                composer.doc.add_page_break()
+                composer.append(page_doc)
+        composer.save(str(docx_path))
 
 
 def ocr_pdf_to_docx(pdf_path: Path, docx_path: Path, lang: str = 'eng+ron+fra'):
-    """OCR a scanned PDF and create a DOCX with the extracted text."""
-    if not TESSERACT_AVAILABLE:
-        raise Exception(
-            "Tesseract OCR not available. Cannot process scanned PDFs. "
-            "Install tesseract-ocr in the container."
-        )
-    # Convert PDF pages to images and OCR each
-    from pdf2image import convert_from_path
-    images = convert_from_path(str(pdf_path), dpi=300)
-    doc = docx.Document()
-    for i, img in enumerate(images):
-        text = pytesseract.image_to_string(img, lang=lang)
-        if text.strip():
-            for para in re.split(r'\n\s*\n', text):
-                cleaned = para.strip()
-                if cleaned:
-                    doc.add_paragraph(cleaned)
-        if i < len(images) - 1:
-            doc.add_page_break()
-    doc.save(str(docx_path))
+    prepare_pdf_for_translation(pdf_path, docx_path, lang)
 
 
 def extract_text_from_pdf(filepath: Path) -> list[str]:
-    """Fallback: extract plain text from PDF (used only if pdf2docx unavailable)."""
     paragraphs = []
     with pdfplumber.open(str(filepath)) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                for para in re.split(r'\n\s*\n', text):
-                    cleaned = para.strip().replace('\n', ' ')
-                    if cleaned:
-                        paragraphs.append(cleaned)
+        for index, page in enumerate(pdf.pages):
+            text = (_ocr_pdf_page(filepath, index + 1, 'eng+ron+fra')
+                    if _page_requires_ocr(page) else page.extract_text() or '')
+            paragraphs.extend(p.strip().replace('\n', ' ') for p in re.split(r'\n\s*\n', text) if p.strip())
     return paragraphs
+
 
 def extract_text_from_txt(filepath: Path) -> list[str]:
     text = filepath.read_text(encoding='utf-8', errors='replace')
-    paragraphs = []
-    for para in re.split(r'\n\s*\n', text):
-        cleaned = para.strip()
-        if cleaned:
-            paragraphs.append(cleaned)
-    return paragraphs
+    return [paragraph.strip() for paragraph in re.split(r'\n\s*\n', text) if paragraph.strip()]
+
 
 def extract_review_segments(filepath: Path):
-    """Segment an already-finished document for review.
-
-    Returns ``(segment_texts, docx_segments)`` where ``docx_segments`` is the
-    structural metadata (only for DOCX, used to rebuild a revised document) or
-    ``None`` for plain-text/PDF sources. DOCX paragraphs keep their inline
-    ⟦n⟧ markers so applied corrections can preserve bold/italic.
-    """
     ext = filepath.suffix.lower()
-    if ext == '.docx':
-        segs = extract_docx_segments(filepath, tag_inline=True)
-        return [s['text'] for s in segs], segs
     if ext == '.pdf':
-        return extract_text_from_pdf(filepath), None
+        converted = Path(str(filepath) + '.review.docx')
+        prepare_pdf_for_translation(filepath, converted)
+        segments = extract_docx_segments(converted, tag_inline=True)
+        return [seg['text'] for seg in segments], segments
+    if ext == '.docx':
+        segments = extract_docx_segments(filepath, tag_inline=True)
+        return [seg['text'] for seg in segments], segments
     if ext in ('.txt', '.text', '.md'):
         return extract_text_from_txt(filepath), None
-    raise ValueError(f"Format nesuportat: {ext}")
+    raise ValueError(f'Format nesuportat: {ext}')
 
 # ============================================================
 # Smart Chunking (for plain text pipeline)
 # ============================================================
 
+def split_text_bounded(text: str, max_chars: int) -> list[str]:
+    """Split without dropping text, preferring word boundaries and whole markers."""
+    if max_chars < 1:
+        raise ValueError("Chunk size must be positive")
+    parts = []
+    while len(text) > max_chars:
+        cut = max_chars
+        # A marker must remain one token so DOCX formatting can be rebuilt.
+        for marker in INLINE_MARKER_RE.finditer(text):
+            if marker.start() < cut < marker.end():
+                cut = marker.start()
+                break
+            if marker.start() >= cut:
+                break
+        if cut == 0:
+            raise ValueError("Chunk size is too small for an inline marker")
+        whitespace = list(re.finditer(r"\s+", text[:cut]))
+        if whitespace and whitespace[-1].end() >= max_chars // 2:
+            cut = whitespace[-1].end()
+        parts.append(text[:cut])
+        text = text[cut:]
+    if text:
+        parts.append(text)
+    return parts
+
+
 def create_chunks(paragraphs: list[str], max_chars: int = MAX_CHUNK_CHARS) -> list[dict]:
     chunks = []
-    current_paras = []
-    current_len = 0
-
+    current = ""
     for para in paragraphs:
-        plen = len(para)
-        if plen > max_chars:
-            if current_paras:
-                chunks.append({"index": len(chunks), "text": "\n\n".join(current_paras), "char_count": current_len})
-                current_paras = []
-                current_len = 0
-            sentences = re.split(r'(?<=[.!?;])\s+', para)
-            sent_buf = []
-            sent_len = 0
-            for sent in sentences:
-                if sent_len + len(sent) > max_chars and sent_buf:
-                    chunks.append({"index": len(chunks), "text": " ".join(sent_buf), "char_count": sent_len})
-                    sent_buf = []
-                    sent_len = 0
-                sent_buf.append(sent)
-                sent_len += len(sent) + 1
-            if sent_buf:
-                chunks.append({"index": len(chunks), "text": " ".join(sent_buf), "char_count": sent_len})
+        if not para:
             continue
-        if current_len + plen + 2 > max_chars and current_paras:
-            chunks.append({"index": len(chunks), "text": "\n\n".join(current_paras), "char_count": current_len})
-            current_paras = []
-            current_len = 0
-        current_paras.append(para)
-        current_len += plen + 2
-
-    if current_paras:
-        chunks.append({"index": len(chunks), "text": "\n\n".join(current_paras), "char_count": current_len})
-    return chunks
+        if len(para) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(split_text_bounded(para, max_chars))
+        elif current and len(current) + 2 + len(para) > max_chars:
+            chunks.append(current)
+            current = para
+        else:
+            current = current + "\n\n" + para if current else para
+    if current:
+        chunks.append(current)
+    return [{"index": i, "text": text, "char_count": len(text)}
+            for i, text in enumerate(chunks)]
 
 # ============================================================
 # LibreTranslate Language Code Mapping
@@ -863,7 +1084,7 @@ async def translate_chunk_libretranslate(session, text, src, tgt, lt_url, job_id
     start = time.time()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with session.post(f"{lt_url}/translate", json=payload,
+            async with session.post(f"{lt_url}/translate", json=payload, allow_redirects=False,
                                     timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status != 200:
                     err = await resp.text()
@@ -930,7 +1151,7 @@ async def translate_chunk(session, text, src, tgt, model, url,
     start = time.time()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with session.post(f"{url}/api/generate", json=payload,
+            async with session.post(f"{url}/api/generate", json=payload, allow_redirects=False,
                                     timeout=aiohttp.ClientTimeout(total=300)) as resp:
                 if resp.status != 200:
                     err = await resp.text()
@@ -975,7 +1196,7 @@ async def translate_batch_ollama(session, texts, src, tgt, model, url,
     start = time.time()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with session.post(f"{url}/api/generate", json=payload,
+            async with session.post(f"{url}/api/generate", json=payload, allow_redirects=False,
                                     timeout=aiohttp.ClientTimeout(total=600)) as resp:
                 if resp.status != 200:
                     err = await resp.text()
@@ -988,14 +1209,8 @@ async def translate_batch_ollama(session, texts, src, tgt, model, url,
                                 prompt, result, attempt, time.time() - start)
                 # Split result back into segments
                 parts = re.split(r'\s*---SEGMENT_BREAK---\s*', result)
-                # If model returned wrong number of parts, fall back
-                if len(parts) != len(texts):
-                    # Try to salvage: if we got more, merge extras; if fewer, pad
-                    if len(parts) > len(texts):
-                        parts = parts[:len(texts)]
-                    else:
-                        while len(parts) < len(texts):
-                            parts.append("")
+                if len(parts) != len(texts) or any(not part.strip() for part in parts):
+                    raise ValueError(f"Invalid batch result: expected {len(texts)} nonempty segments, got {len(parts)}")
                 return [p.strip() for p in parts], attempt
         except Exception as e:
             last_err = e
@@ -1012,6 +1227,10 @@ async def translate_batch_ollama(session, texts, src, tgt, model, url,
 async def run_pipeline(job: TranslationJob):
     try:
         job.started_at = datetime.now().isoformat()
+        if job.engine == 'libretranslate':
+            job.libretranslate_url = validate_engine_url(job.libretranslate_url, 'libretranslate')
+        else:
+            job.ollama_url = validate_engine_url(job.ollama_url, 'ollama')
         filepath = UPLOAD_DIR / f"{job.job_id}_{job.filename}"
         ext = filepath.suffix.lower()
         is_docx = ext == '.docx'
@@ -1031,58 +1250,19 @@ async def run_pipeline(job: TranslationJob):
             job.current_step = "Analyzing PDF type (digital vs scanned)..."
             emit(job)
 
-            has_text = pdf_has_selectable_text(filepath)
             pdf_converted_docx = UPLOAD_DIR / f"{job.job_id}_converted.docx"
-
-            if has_text:
-                # Digital PDF -> convert with pdf2docx (preserves layout)
-                job.current_step = "Converting PDF to DOCX (preserving layout)..."
-                job.add_event("info", "PDF type: digital (selectable text)",
-                              "Using pdf2docx for format preservation")
-                emit(job)
-                try:
-                    convert_pdf_to_docx(filepath, pdf_converted_docx)
-                    job.add_event("success", "PDF converted to DOCX",
-                                  "Layout and formatting preserved")
-                except Exception as e:
-                    job.add_event("warning", f"pdf2docx conversion failed: {e}",
-                                  "Falling back to plain text extraction")
-                    pdf_converted_docx = None
-            else:
-                # Scanned PDF -> OCR then create DOCX
-                job.current_step = "Scanned PDF detected. Running OCR..."
-                # Map source language to Tesseract language codes
-                tess_lang_map = {
-                    'ro': 'ron', 'en': 'eng', 'fr': 'fra', 'de': 'deu',
-                    'es': 'spa', 'it': 'ita', 'pt': 'por', 'nl': 'nld',
-                    'pl': 'pol', 'ru': 'rus', 'uk': 'ukr', 'bg': 'bul',
-                    'hr': 'hrv', 'cs': 'ces', 'sk': 'slk', 'hu': 'hun',
-                    'el': 'ell', 'tr': 'tur', 'ar': 'ara', 'ja': 'jpn',
-                    'ko': 'kor', 'zh-Hans': 'chi_sim', 'zh-Hant': 'chi_tra'
-                }
-                ocr_lang = tess_lang_map.get(job.source_lang, 'eng')
-                # Always include eng as fallback
-                if ocr_lang != 'eng':
-                    ocr_lang = f"{ocr_lang}+eng"
-                job.add_event("info", "PDF type: scanned (image-based)",
-                              f"Running Tesseract OCR with lang={ocr_lang}")
-                emit(job)
-                try:
-                    ocr_pdf_to_docx(filepath, pdf_converted_docx, lang=ocr_lang)
-                    job.add_event("success", "OCR complete, DOCX created",
-                                  "Text extracted from scanned pages")
-                except Exception as e:
-                    job.add_event("warning", f"OCR failed: {e}",
-                                  "Falling back to plain text extraction")
-                    pdf_converted_docx = None
-
-            if pdf_converted_docx and pdf_converted_docx.exists():
-                # Use the converted DOCX for format-preserving pipeline
-                filepath = pdf_converted_docx
-                use_docx_pipeline = True
-            else:
-                # Fallback: plain text extraction
-                use_docx_pipeline = False
+            ocr_lang = TESS_LANG_MAP.get(job.source_lang, 'eng')
+            if ocr_lang != 'eng':
+                ocr_lang += '+eng'
+            job.current_step = "Converting PDF pages (digital text and OCR)..."
+            emit(job)
+            # A failed page must fail the job; plain-text fallback could silently
+            # discard scanned pages from an otherwise digital document.
+            prepare_pdf_for_translation(filepath, pdf_converted_docx, lang=ocr_lang)
+            filepath = pdf_converted_docx
+            job.original_docx_path = str(pdf_converted_docx)
+            use_docx_pipeline = True
+            job.add_event("success", "PDF converted", "Every page processed")
 
         if use_docx_pipeline:
             # Format-preserving DOCX pipeline (for DOCX and converted PDF)
@@ -1165,7 +1345,7 @@ async def run_pipeline(job: TranslationJob):
             # Verify connection to translation engine
             if use_libretranslate:
                 try:
-                    async with session.get(f"{job.libretranslate_url}/languages",
+                    async with session.get(f"{job.libretranslate_url}/languages", allow_redirects=False,
                                            timeout=aiohttp.ClientTimeout(total=5)) as r:
                         if r.status != 200:
                             raise Exception(f"HTTP {r.status}")
@@ -1174,7 +1354,7 @@ async def run_pipeline(job: TranslationJob):
                 job.add_event("success", "LibreTranslate connected", job.libretranslate_url)
             else:
                 try:
-                    async with session.get(f"{job.ollama_url}/api/tags",
+                    async with session.get(f"{job.ollama_url}/api/tags", allow_redirects=False,
                                            timeout=aiohttp.ClientTimeout(total=5)) as r:
                         if r.status != 200:
                             raise Exception(f"HTTP {r.status}")
@@ -1186,18 +1366,55 @@ async def run_pipeline(job: TranslationJob):
             lock = asyncio.Lock()
             total_segs = len(chunks_to_translate)
 
+            async def translate_segment(chunk):
+                parts = split_text_bounded(chunk["text"], job.chunk_size)
+                results = []
+                attempts = 1
+                for part in parts:
+                    if job.cancelled:
+                        raise asyncio.CancelledError
+                    if use_libretranslate:
+                        translated, count = await translate_chunk_libretranslate(
+                            session, part, job.source_lang, job.target_lang,
+                            job.libretranslate_url, job_id=job.job_id)
+                    else:
+                        translated, count = await translate_chunk(
+                            session, part, job.source_lang, job.target_lang,
+                            job.model, job.ollama_url, num_ctx=job.num_ctx,
+                            keep_alive=job.keep_alive, job_id=job.job_id,
+                            original_prompt=job.original_prompt)
+                    # Restore only separator whitespace at the split boundary;
+                    # each engine is free to translate the words in its fragment.
+                    separator = re.search(r"\s+$", part)
+                    results.append(translated + (separator.group() if separator else ""))
+                    attempts = max(attempts, count)
+                return "".join(results), attempts
+
             # Decide whether to use batching (Ollama only, batch_size > 1)
             # Batching adds segment-separator instructions to the prompt, which would
             # break the native "original prompt" — so it's disabled in that mode.
-            use_batching = (not use_libretranslate) and job.batch_size > 1 and not job.original_prompt
+            use_batching = ((not use_libretranslate) and job.batch_size > 1
+                            and not job.original_prompt
+                            and all(len(c["text"]) <= job.chunk_size for c in chunks_to_translate))
 
             if use_batching:
                 # --- BATCH MODE (Ollama) ---
                 batch_sz = job.batch_size
                 batches = []
-                for bi in range(0, total_segs, batch_sz):
-                    batch_chunks = chunks_to_translate[bi:bi+batch_sz]
-                    batches.append((bi, batch_chunks))
+                pending = []
+                pending_chars = 0
+                batch_start = 0
+                for index, chunk in enumerate(chunks_to_translate):
+                    added_chars = len(chunk["text"]) + (len(BATCH_SEPARATOR) if pending else 0)
+                    if pending and (len(pending) >= batch_sz or pending_chars + added_chars > job.chunk_size):
+                        batches.append((batch_start, pending))
+                        pending, pending_chars, batch_start = [], 0, index
+                        added_chars = len(chunk["text"])
+                    pending.append(chunk)
+                    pending_chars += added_chars
+                if pending:
+                    batches.append((batch_start, pending))
+                batch_numbers = {start: number + 1 for number, (start, _) in enumerate(batches)}
                 job.add_event("info", "Batch mode enabled",
                               f"{len(batches)} batches of up to {batch_sz} segments")
                 emit(job)
@@ -1209,7 +1426,7 @@ async def run_pipeline(job: TranslationJob):
                         if job.cancelled:
                             return
                         indices = list(range(batch_start, batch_start + len(batch_chunks)))
-                        batch_num = batch_start // batch_sz + 1
+                        batch_num = batch_numbers[batch_start]
                         total_batch_chars = sum(c["char_count"] for c in batch_chunks)
                         async with lock:
                             job.current_step = f"[Ollama] Batch {batch_num}/{len(batches)} ({len(batch_chunks)} seg, {total_batch_chars} chars)..."
@@ -1246,12 +1463,7 @@ async def run_pipeline(job: TranslationJob):
                                 if job.cancelled:
                                     return
                                 try:
-                                    translated, att = await translate_chunk(
-                                        session, chunk["text"], job.source_lang, job.target_lang,
-                                        job.model, job.ollama_url, num_ctx=job.num_ctx,
-                                        keep_alive=job.keep_alive, job_id=job.job_id,
-                                        original_prompt=job.original_prompt
-                                    )
+                                    translated, att = await translate_segment(chunk)
                                     job.translated_chunks[idx] = translated
                                     async with lock:
                                         job.completed_chunks += 1
@@ -1287,18 +1499,7 @@ async def run_pipeline(job: TranslationJob):
                             job.progress = 12 + (78 * job.completed_chunks / total_segs)
                             emit(job)
                         try:
-                            if use_libretranslate:
-                                translated, attempts = await translate_chunk_libretranslate(
-                                    session, chunk["text"], job.source_lang, job.target_lang,
-                                    job.libretranslate_url, job_id=job.job_id
-                                )
-                            else:
-                                translated, attempts = await translate_chunk(
-                                    session, chunk["text"], job.source_lang, job.target_lang,
-                                    job.model, job.ollama_url, num_ctx=job.num_ctx,
-                                    keep_alive=job.keep_alive, job_id=job.job_id,
-                                    original_prompt=job.original_prompt
-                                )
+                            translated, attempts = await translate_segment(chunk)
                             job.translated_chunks[i] = translated
                             async with lock:
                                 job.completed_chunks += 1
@@ -1332,8 +1533,8 @@ async def run_pipeline(job: TranslationJob):
                 emit(job)
                 return
 
-        if job.total_chunks and job.failed_chunks == job.total_chunks:
-            raise RuntimeError("Traducerea a eșuat pentru toate segmentele. Verifică motorul și modelul selectat; detaliile sunt în evenimentele jobului.")
+        if job.failed_chunks:
+            raise RuntimeError(f"Traducere incompletă: {job.failed_chunks}/{job.total_chunks} segmente au eșuat. Verifică motorul și modelul; detaliile sunt în evenimentele jobului.")
 
         # --- ASSEMBLE ---
         job.status = JobStatus.ASSEMBLING
@@ -1347,12 +1548,7 @@ async def run_pipeline(job: TranslationJob):
             apply_translations_to_docx(filepath, segments, job.translated_chunks, output_path)
             label = "PDF->DOCX assembled (format preserved)" if is_pdf else "DOCX assembled (format preserved)"
             job.add_event("success", label, out_name)
-            # Cleanup temp converted DOCX if it was a PDF
-            if pdf_converted_docx and pdf_converted_docx.exists():
-                try:
-                    pdf_converted_docx.unlink()
-                except:
-                    pass
+            # Keep converted structure for review; job deletion/retention removes it.
         else:
             out_name = Path(job.filename).stem + f"_{job.target_lang}"
             if ext == '.pdf':
@@ -1396,6 +1592,14 @@ async def run_pipeline(job: TranslationJob):
                       f"{job.failed_chunks} failures, {job.retried_chunks} retries")
         emit(job)
 
+    except asyncio.CancelledError:
+        job.cancelled = True
+        job.status = JobStatus.CANCELLED
+        job.current_step = "Cancelled by user"
+        job.completed_at = datetime.now().isoformat()
+        job.add_event("warning", "Job cancelled by user")
+        emit(job)
+        raise
     except Exception as e:
         job.status = JobStatus.FAILED
         job.error = str(e)
@@ -1506,7 +1710,7 @@ async def review_segment(session, src_text, tgt_text, src, tgt, model, url,
     start = time.time()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with session.post(f"{url}/api/generate", json=payload,
+            async with session.post(f"{url}/api/generate", json=payload, allow_redirects=False,
                                     timeout=aiohttp.ClientTimeout(total=300)) as resp:
                 if resp.status != 200:
                     err = await resp.text()
@@ -1631,7 +1835,7 @@ async def run_review(job: TranslationJob, model: str, url: str,
         async with aiohttp.ClientSession() as session:
             # Verify model/endpoint reachable
             try:
-                async with session.get(f"{url}/api/tags",
+                async with session.get(f"{url}/api/tags", allow_redirects=False,
                                        timeout=aiohttp.ClientTimeout(total=5)) as r:
                     if r.status != 200:
                         raise Exception(f"HTTP {r.status}")
@@ -1722,11 +1926,15 @@ def build_revised_document(job: TranslationJob, revised_translations: list[str])
     else:
         orig_filename = job.original_filename or job.filename
         orig_docx_segments = job.original_docx_segments or job.docx_segments
-    original_path = UPLOAD_DIR / f"{job.job_id}_{orig_filename}"
+    original_path = Path(getattr(job, "original_docx_path", "") or (UPLOAD_DIR / f"{job.job_id}_{orig_filename}"))
+    if getattr(job, 'original_docx_path', None) and not original_path.exists():
+        raise FileNotFoundError('Documentul de bază pentru revizuire lipsește. Reîncarcă documentul înainte de a aplica modificările.')
     orig_ext = Path(orig_filename).suffix.lower()
+    if orig_ext == '.docx' and (not original_path.exists() or not orig_docx_segments):
+        raise FileNotFoundError('Documentul DOCX de bază sau structura sa lipsește. Reîncarcă documentul înainte de revizuire.')
     stem = Path(orig_filename).stem
 
-    if orig_ext == '.docx' and orig_docx_segments and original_path.exists():
+    if original_path.suffix.lower() == '.docx' and orig_docx_segments and original_path.exists():
         out_name = f"{stem}_{job.target_lang}_revizuit_review.docx"
         out_path = OUTPUT_DIR / f"{job.job_id}_rev_{out_name}"
         translations = []
@@ -1790,25 +1998,46 @@ async def index():
 async def api_status():
     return await get_dashboard_data()
 
+@app.get("/healthz")
+async def healthz():
+    """Public minimal readiness: no prompts, filenames, URLs or secret values."""
+    ready = False
+    if configured_password():
+        if DEFAULT_ENGINE == "libretranslate":
+            status = await api_libretranslate(DEFAULT_LIBRETRANSLATE_URL)
+            installed = {entry["code"] for entry in status.get("languages", [])}
+            ready = status.get("connected", False) and set(_get_installed_languages()) <= installed
+        else:
+            status = await get_ollama_status(DEFAULT_OLLAMA_URL)
+            models = {entry.get("name", "") for entry in status.get("models", [])}
+            ready = status.get("connected", False) and (DEFAULT_MODEL in models or DEFAULT_MODEL + ":latest" in models)
+    return JSONResponse({"ready": bool(ready)}, status_code=200 if ready else 503)
+
 @app.get("/api/ollama")
 async def api_ollama(url: str = DEFAULT_OLLAMA_URL):
+    url = validate_engine_url(url)
     return await get_ollama_status(url)
 
 @app.get("/api/models")
 async def api_models(url: str = DEFAULT_OLLAMA_URL):
+    url = validate_engine_url(url)
     result = await get_ollama_status(url)
     return {"connected": result["connected"], "models": result["models"]}
 
 @app.get("/api/libretranslate")
 async def api_libretranslate(url: str = DEFAULT_LIBRETRANSLATE_URL):
     """Check LibreTranslate status and available languages."""
+    url = validate_engine_url(url, "libretranslate")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{url}/languages",
-                                   timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                                   timeout=aiohttp.ClientTimeout(total=5), allow_redirects=False) as resp:
                 if resp.status == 200:
                     languages = await resp.json()
-                    return {"connected": True, "languages": languages, "url": url}
+                    if isinstance(languages, list) and languages and all(isinstance(entry, dict) and isinstance(entry.get("code"), str) for entry in languages):
+                        # Reflect only the documented language fields, never arbitrary JSON.
+                        languages = [{"code": entry["code"], "name": str(entry.get("name", entry["code"]))} for entry in languages]
+                        return {"connected": True, "languages": languages, "url": url}
     except:
         pass
     return {"connected": False, "languages": [], "url": url}
@@ -1831,13 +2060,14 @@ async def api_translate(
     chunk_size: int = Form(MAX_CHUNK_CHARS),
     original_prompt: str = Form("false")
 ):
-    # Use server-detected URL if client sends empty
-    if not ollama_url:
-        ollama_url = DEFAULT_OLLAMA_URL
-    ext = Path(file.filename).suffix.lower()
+    validate_languages(source_lang, target_lang)
+    ollama_url = validate_engine_url(ollama_url)
+    libretranslate_url = validate_engine_url(libretranslate_url, "libretranslate")
+    stored_name = upload_filename(file.filename)
+    ext = Path(stored_name).suffix.lower()
     if ext not in ('.docx', '.pdf', '.txt', '.text', '.md'):
         raise HTTPException(400, f"Unsupported: {ext}")
-    content = await file.read()
+    content = await file.read(MAX_FILE_SIZE + 1)
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(400, f"File too large (max {MAX_FILE_SIZE // 1024 // 1024}MB)")
     concurrency = max(1, min(concurrency, 10))
@@ -1849,17 +2079,27 @@ async def api_translate(
     engine = engine if engine in ('ollama', 'libretranslate') else 'ollama'
     pdf_convert = convert_to_pdf.lower() in ('true', '1', 'yes')
     orig_prompt = original_prompt.lower() in ('true', '1', 'yes')
-    job = TranslationJob(job_id, file.filename, source_lang, target_lang, model, ollama_url,
+    job = TranslationJob(job_id, stored_name, source_lang, target_lang, model, ollama_url,
                          client_ip, concurrency=concurrency, num_ctx=num_ctx,
                          engine=engine, libretranslate_url=libretranslate_url,
                          convert_to_pdf=pdf_convert, batch_size=batch_size,
                          keep_alive=keep_alive, chunk_size=chunk_size,
                          original_prompt=orig_prompt)
-    jobs[job_id] = job
-    save_path = UPLOAD_DIR / f"{job_id}_{file.filename}"
-    save_path.write_bytes(content)
+    job.display_filename = file.filename
+    save_path = UPLOAD_DIR / f"{job_id}_{stored_name}"
+    try:
+        save_path.write_bytes(content)
+    except OSError as exc:
+        save_path.unlink(missing_ok=True)
+        raise HTTPException(500, "Fișierul nu a putut fi salvat.") from exc
     job.add_event("info", "File uploaded", f"{file.filename} ({len(content):,} bytes) from {client_ip}")
-    asyncio.create_task(run_pipeline(job))
+    jobs[job_id] = job
+    try:
+        start_pipeline(job)
+    except Exception:
+        jobs.pop(job_id, None)
+        save_path.unlink(missing_ok=True)
+        raise
     return {"job_id": job_id, "status": "queued"}
 
 
@@ -1885,7 +2125,9 @@ async def api_translate_text(req: TextTranslateRequest):
     if len(text) > 50000:
         raise HTTPException(400, "Text too long (max 50,000 characters)")
 
-    ollama_url = req.ollama_url or DEFAULT_OLLAMA_URL
+    validate_languages(req.source_lang, req.target_lang)
+    ollama_url = validate_engine_url(req.ollama_url)
+    libretranslate_url = validate_engine_url(req.libretranslate_url, "libretranslate")
     engine = req.engine if req.engine in ('ollama', 'libretranslate') else 'ollama'
     num_ctx = max(512, min(req.num_ctx, 32768))
 
@@ -1896,7 +2138,7 @@ async def api_translate_text(req: TextTranslateRequest):
             if engine == 'libretranslate':
                 # For LibreTranslate, translate directly (handles chunking internally for short text)
                 translated, attempts = await translate_chunk_libretranslate(
-                    session, text, req.source_lang, req.target_lang, req.libretranslate_url,
+                    session, text, req.source_lang, req.target_lang, libretranslate_url,
                     job_id="text"
                 )
             else:
@@ -1928,7 +2170,7 @@ async def api_job(job_id: str):
 async def api_cancel(job_id: str):
     if job_id not in jobs:
         raise HTTPException(404)
-    jobs[job_id].cancelled = True
+    await cancel_job_tasks(jobs[job_id], review=False)
     return {"ok": True}
 
 
@@ -1944,14 +2186,17 @@ async def api_verify_documents(
     translation). Segments are aligned by position; the existing review pipeline
     then verifies each (original, translation) pair. No translation is performed.
     """
+    validate_languages(source_lang, target_lang)
+    original_name = upload_filename(original.filename)
+    translated_name = upload_filename(translated.filename)
     allowed = ('.docx', '.pdf', '.txt', '.text', '.md')
-    for f in (original, translated):
-        ext = Path(f.filename).suffix.lower()
+    for filename in (original_name, translated_name):
+        ext = Path(filename).suffix.lower()
         if ext not in allowed:
             raise HTTPException(400, f"Format nesuportat: {ext}. Acceptate: {', '.join(allowed)}")
 
-    orig_bytes = await original.read()
-    trans_bytes = await translated.read()
+    orig_bytes = await original.read(MAX_FILE_SIZE + 1)
+    trans_bytes = await translated.read(MAX_FILE_SIZE + 1)
     for b in (orig_bytes, trans_bytes):
         if len(b) > MAX_FILE_SIZE:
             raise HTTPException(400, f"Fișier prea mare (max {MAX_FILE_SIZE // 1024 // 1024}MB)")
@@ -1959,58 +2204,66 @@ async def api_verify_documents(
     job_id = str(uuid.uuid4())[:8]
     # The translated file is saved under the job-id prefix so a revised document
     # can later be rebuilt on top of it (preserving DOCX formatting).
-    orig_path = UPLOAD_DIR / f"{job_id}_orig_{original.filename}"
-    trans_path = UPLOAD_DIR / f"{job_id}_{translated.filename}"
-    orig_path.write_bytes(orig_bytes)
-    trans_path.write_bytes(trans_bytes)
+    orig_path = UPLOAD_DIR / f"{job_id}_orig_{original_name}"
+    trans_path = UPLOAD_DIR / f"{job_id}_{translated_name}"
+    output_path = OUTPUT_DIR / f"{job_id}_{translated_name}"
+    staged_paths = [orig_path, trans_path, output_path,
+                    Path(str(orig_path) + '.review.docx'), Path(str(trans_path) + '.review.docx')]
 
-    try:
-        # Include table paragraphs, including merged and nested table cells.
-        src_texts, orig_docx = extract_review_segments(orig_path)
-        tgt_texts, tgt_docx = extract_review_segments(trans_path)
-    except Exception as e:
-        raise HTTPException(400, f"Nu am putut citi documentele: {e}")
+    with file_lease(*staged_paths):
+        try:
+            orig_path.write_bytes(orig_bytes)
+            trans_path.write_bytes(trans_bytes)
+            # Include table paragraphs, including merged and nested table cells.
+            src_texts, orig_docx = extract_review_segments(orig_path)
+            tgt_texts, tgt_docx = extract_review_segments(trans_path)
+            if not src_texts or not tgt_texts:
+                raise HTTPException(400, "Unul dintre documente nu conține text de verificat.")
+            orig_count, trans_count = len(src_texts), len(tgt_texts)
+            src_texts, n, mismatch = align_review_segments(src_texts, orig_docx, tgt_texts, tgt_docx)
+            if not n:
+                raise HTTPException(400, "Documentele nu au segmente corespunzătoare de verificat.")
+            output_path.write_bytes(trans_bytes)
+        except Exception as e:
+            for path in staged_paths:
+                path.unlink(missing_ok=True)
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(400, f"Nu am putut citi documentele: {e}")
 
-    if not src_texts or not tgt_texts:
-        raise HTTPException(400, "Unul dintre documente nu conține text de verificat.")
+        # Retain unmatched translated content for reconstruction. run_review skips
+        # target segments without an aligned source, but export must not drop them.
 
-    orig_count, trans_count = len(src_texts), len(tgt_texts)
-    mismatch = orig_count != trans_count
-    n = min(orig_count, trans_count)
-    src_texts = src_texts[:n]
-    # Retain unmatched translated content for reconstruction. run_review skips
-    # target segments without an aligned source, but export must not drop them.
-    if orig_docx is not None:
-        orig_docx = orig_docx[:n]
-
-    client_ip = request.client.host if request and request.client else "-"
-    job = TranslationJob(job_id, translated.filename, source_lang, target_lang,
-                         model="", ollama_url=DEFAULT_OLLAMA_URL, client_ip=client_ip)
-    job.kind = "verify"
-    job.status = JobStatus.COMPLETED
-    job.progress = 100.0
-    job.current_step = "Verificare pregătită"
-    job.started_at = job.created_at
-    job.completed_at = datetime.now().isoformat()
-    job.source_segments = src_texts
-    job.translated_chunks = tgt_texts
-    job.docx_segments = tgt_docx or []
-    job.original_filename = original.filename
-    job.original_docx_segments = orig_docx or []
-    job.total_chunks = n
-    job.completed_chunks = n
-    job.output_file = translated.filename
-    # Saving the translation to OUTPUT_DIR lets the job's normal download button
-    # return the document under review.
-    (OUTPUT_DIR / f"{job_id}_{translated.filename}").write_bytes(trans_bytes)
-    detail = f"original={original.filename}, tradus={translated.filename}, {n} segmente"
-    if mismatch:
-        detail += f" — numere diferite de segmente ({orig_count} vs {trans_count}), aliniat la {n}"
-    job.add_event("info", "Verificare document încărcată", detail)
-    jobs[job_id] = job
-    emit(job)
-    return {"job_id": job_id, "total": n, "original_segments": orig_count,
-            "translated_segments": trans_count, "mismatch": mismatch}
+        client_ip = request.client.host if request and request.client else "-"
+        job = TranslationJob(job_id, translated_name, source_lang, target_lang,
+                             model="", ollama_url=DEFAULT_OLLAMA_URL, client_ip=client_ip)
+        job.display_filename = translated.filename
+        job.kind = "verify"
+        job.status = JobStatus.COMPLETED
+        job.progress = 100.0
+        job.current_step = "Verificare pregătită"
+        job.started_at = job.created_at
+        job.completed_at = datetime.now().isoformat()
+        job.source_segments = src_texts
+        job.translated_chunks = tgt_texts
+        job.docx_segments = tgt_docx or []
+        job.original_filename = original_name
+        job.original_docx_segments = orig_docx or []
+        if Path(translated_name).suffix.lower() == '.pdf':
+            job.original_docx_path = str(Path(str(trans_path) + '.review.docx'))
+        job.total_chunks = n
+        job.completed_chunks = n
+        job.output_file = translated_name
+        # Saving the translation to OUTPUT_DIR lets the job's normal download button
+        # return the document under review.
+        detail = f"original={original.filename}, tradus={translated.filename}, {n} segmente"
+        if mismatch:
+            detail += f" — numere diferite de segmente ({orig_count} vs {trans_count}), aliniat la {n}"
+        job.add_event("info", "Verificare document încărcată", detail)
+        jobs[job_id] = job
+        emit(job)
+        return {"job_id": job_id, "total": n, "original_segments": orig_count,
+                "translated_segments": trans_count, "mismatch": mismatch}
 
 
 class ReviewRequest(BaseModel):
@@ -2029,6 +2282,8 @@ async def api_review(job_id: str, req: ReviewRequest):
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
     job = jobs[job_id]
+    if getattr(job, "deleting", False):
+        raise HTTPException(409, "Jobul este în curs de ștergere.")
     if job.status != JobStatus.COMPLETED:
         raise HTTPException(400, "Jobul trebuie să fie finalizat înainte de verificare.")
     if not any(job.translated_chunks):
@@ -2040,12 +2295,13 @@ async def api_review(job_id: str, req: ReviewRequest):
     num_ctx = max(512, min(req.num_ctx, 32768))
     concurrency = max(1, min(req.concurrency, 10))
     context_window = max(0, min(req.context_window, 5))
+    url = validate_engine_url(url, 'ollama')
     _reset_review(job, model)
-    asyncio.create_task(run_review(job, model, url, num_ctx=num_ctx,
+    start_review(job, model, url, num_ctx=num_ctx,
                                    concurrency=concurrency, keep_alive=req.keep_alive,
                                    context_window=context_window,
                                    context_translations=bool(req.context_translations),
-                                   _prepared=True))
+                                   _prepared=True)
     return {"ok": True, "model": model, "total": len(job.source_segments)}
 
 
@@ -2073,7 +2329,7 @@ async def api_review_results(job_id: str):
 async def api_review_cancel(job_id: str):
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
-    jobs[job_id].review_cancel = True
+    await cancel_job_tasks(jobs[job_id], translation=False)
     return {"ok": True}
 
 
@@ -2274,8 +2530,11 @@ async def api_review_text(req: ReviewTextRequest):
     tgt_text = (req.translated_text or "").strip()
     if not src_text or not tgt_text:
         raise HTTPException(400, "Sursa și traducerea sunt obligatorii.")
+    if len(src_text) > 50000 or len(tgt_text) > 50000:
+        raise HTTPException(400, "Text prea lung (maximum 50.000 de caractere per câmp).")
+    validate_languages(req.source_lang, req.target_lang)
     model = (req.model or "").strip() or DEFAULT_MODEL
-    url = (req.ollama_url or "").strip() or DEFAULT_OLLAMA_URL
+    url = validate_engine_url(req.ollama_url)
     num_ctx = max(512, min(req.num_ctx, 32768))
     try:
         async with aiohttp.ClientSession() as session:
@@ -2302,34 +2561,31 @@ async def api_download(job_id: str):
 async def api_delete(job_id: str):
     if job_id not in jobs:
         raise HTTPException(404)
-    job = jobs.pop(job_id)
-    paths_to_clean = [
-        UPLOAD_DIR / f"{job_id}_{job.filename}",
-        OUTPUT_DIR / f"{job_id}_{job.output_file}" if job.output_file else None,
-        OUTPUT_DIR / f"{job_id}_rev_{job.revised_output_file}" if job.revised_output_file else None,
-        OUTPUT_DIR / f"{job_id}_export_{job.review_export_file}" if job.review_export_file else None,
-    ]
-    # For verify jobs, also clean the original file
-    if job.kind == "verify" and job.original_filename:
-        paths_to_clean.append(UPLOAD_DIR / f"{job_id}_orig_{job.original_filename}")
-    for p in paths_to_clean:
-        if p and p.exists():
-            try:
-                p.unlink()
-            except:
-                pass
+    job = jobs[job_id]
+    if getattr(job, "deleting", False):
+        raise HTTPException(409, "Jobul este în curs de ștergere.")
+    # Reserve deletion before awaiting cancellation so another request cannot
+    # start a review in the gap between stopping work and removing its files.
+    job.deleting = True
+    await cancel_job_tasks(job)
+    jobs.pop(job_id, None)
+    # Includes converted PDF structure, previous review exports and partial files.
+    for directory in (UPLOAD_DIR, OUTPUT_DIR):
+        for path in directory.iterdir():
+            if path.is_file() and path.name.startswith(job_id + "_"):
+                path.unlink(missing_ok=True)
     return {"ok": True}
+
 
 @app.post("/api/jobs/stop-all")
 async def api_stop_all():
-    stopped = 0
-    for job in jobs.values():
-        if job.status in (JobStatus.QUEUED, JobStatus.EXTRACTING,
-                          JobStatus.CHUNKING, JobStatus.TRANSLATING, JobStatus.ASSEMBLING):
-            job.cancelled = True
-            stopped += 1
-    app_logger.warning(f"Stop all: {stopped} jobs cancelled")
-    return {"ok": True, "stopped": stopped}
+    active = [job for job in list(jobs.values())
+              if job.status in (JobStatus.QUEUED, JobStatus.EXTRACTING,
+                 JobStatus.CHUNKING, JobStatus.TRANSLATING, JobStatus.ASSEMBLING)
+              or job.review_status == "running"]
+    await asyncio.gather(*(cancel_job_tasks(job) for job in active))
+    app_logger.warning(f"Stop all: {len(active)} jobs cancelled")
+    return {"ok": True, "stopped": len(active)}
 
 # ============================================================
 # Logs & Files Endpoints
@@ -2367,7 +2623,7 @@ async def api_files():
     for d, category in [(UPLOAD_DIR, "upload"), (OUTPUT_DIR, "output")]:
         if d.exists():
             for f in sorted(d.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-                if f.is_file():
+                if f.is_file() and not f.is_symlink():
                     stat = f.stat()
                     files.append({
                         "name": f.name,
@@ -2378,31 +2634,42 @@ async def api_files():
                     })
     return {"files": files, "upload_dir": str(UPLOAD_DIR), "output_dir": str(OUTPUT_DIR)}
 
-@app.delete("/api/files/{category}/{filename}")
-async def api_delete_file(category: str, filename: str):
+def stored_file(category: str, filename: str):
+    if not filename or filename in (".", "..") or any(c in filename for c in ("/", "\\", "\0")):
+        raise HTTPException(400, "Nume de fișier invalid.")
     if category == "upload":
         path = UPLOAD_DIR / filename
     elif category == "output":
         path = OUTPUT_DIR / filename
     else:
         raise HTTPException(400, "Invalid category")
-    if not path.exists():
+    if path.is_symlink() or not path.is_file():
         raise HTTPException(404, "File not found")
+    return path
+
+
+@app.get("/api/files/{category}/{filename}")
+async def api_download_file(category: str, filename: str):
+    path = stored_file(category, filename)
+    if is_file_active(path):
+        raise HTTPException(409, "Fișierul este utilizat de o operație activă.")
+    return FileResponse(str(path), filename=filename)
+
+
+@app.delete("/api/files/{category}/{filename}")
+async def api_delete_file(category: str, filename: str):
+    path = stored_file(category, filename)
+    if is_file_active(path):
+        raise HTTPException(409, "Fișierul este utilizat de o operație activă.")
     path.unlink()
     app_logger.info(f"File deleted: {category}/{filename}")
     return {"ok": True}
 
 @app.post("/api/files/cleanup")
 async def api_cleanup_files():
-    deleted = 0
-    for d in [UPLOAD_DIR, OUTPUT_DIR]:
-        if d.exists():
-            for f in d.iterdir():
-                if f.is_file():
-                    f.unlink()
-                    deleted += 1
-    app_logger.warning(f"Cleanup: {deleted} files deleted")
-    return {"ok": True, "deleted": deleted}
+    deleted, skipped = _cleanup_files(older_than=None)
+    app_logger.warning(f"Cleanup: {deleted} files deleted; {skipped} active files retained")
+    return {"ok": True, "deleted": deleted, "skipped_active": skipped}
 
 # ============================================================
 # OCR Standalone Endpoint
@@ -2418,112 +2685,72 @@ TESS_LANG_MAP = {
 }
 
 @app.post("/api/ocr")
-async def api_ocr(
-    file: UploadFile = File(...),
-    lang: str = Form("ro"),
-):
-    """Standalone OCR: extract text from PDF, DOCX, or image files.
-    For PDF/DOCX input, returns a downloadable PDF with extracted text.
-    For images, returns extracted text as JSON + downloadable PDF."""
-    if not TESSERACT_AVAILABLE:
-        raise HTTPException(500, "Tesseract OCR nu este disponibil pe server.")
-
-    ext = Path(file.filename).suffix.lower()
+async def api_ocr(file: UploadFile = File(...), lang: str = Form("ro")):
+    """Extract digital/OCR text, including all DOCX table/header/footer stories."""
+    ext = Path(file.filename or '').suffix.lower()
     allowed = ('.pdf', '.docx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.webp')
     if ext not in allowed:
         raise HTTPException(400, f"Format nesuportat: {ext}. Acceptate: {', '.join(allowed)}")
-
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(400, f"Fișier prea mare (max {MAX_FILE_SIZE // 1024 // 1024}MB)")
-
     ocr_id = str(uuid.uuid4())[:8]
-    input_path = UPLOAD_DIR / f"ocr_{ocr_id}{ext}"
-    input_path.write_bytes(content)
-
+    input_path = UPLOAD_DIR / f'ocr_{ocr_id}{ext}'
+    out_docx_path = OUTPUT_DIR / f'ocr_{ocr_id}_result.docx'
+    out_pdf_path = OUTPUT_DIR / f'ocr_{ocr_id}_result.pdf'
     tess_lang = TESS_LANG_MAP.get(lang, 'eng')
     if tess_lang != 'eng':
-        tess_lang = f"{tess_lang}+eng"
-
-    extracted_text = ""
-    try:
-        if ext == '.pdf':
-            # PDF -> OCR each page
-            from pdf2image import convert_from_path
-            images = convert_from_path(str(input_path), dpi=300)
-            pages_text = []
-            for i, img in enumerate(images):
-                text = pytesseract.image_to_string(img, lang=tess_lang)
-                pages_text.append(text.strip())
-            extracted_text = "\n\n--- Pagina {} ---\n\n".join(
-                ["" for _ in range(len(pages_text) + 1)]
-            )  # placeholder
-            # Build proper page-separated text
-            parts = []
-            for i, pt in enumerate(pages_text):
-                parts.append(f"--- Pagina {i+1} ---\n\n{pt}")
-            extracted_text = "\n\n".join(parts)
-
-        elif ext == '.docx':
-            # DOCX -> extract text from paragraphs (already digital text)
-            doc_obj = docx.Document(str(input_path))
-            paragraphs = [p.text for p in doc_obj.paragraphs if p.text.strip()]
-            extracted_text = "\n\n".join(paragraphs)
-
-        else:
-            # Image file -> OCR directly
-            img = Image.open(str(input_path))
-            extracted_text = pytesseract.image_to_string(img, lang=tess_lang)
-
-    except Exception as e:
-        # Cleanup
+        tess_lang += '+eng'
+    with file_lease(input_path, out_docx_path, out_pdf_path):
         try:
-            input_path.unlink()
-        except:
-            pass
-        raise HTTPException(500, f"Eroare OCR: {str(e)}")
-
-    # Create output DOCX then convert to PDF
-    out_docx_path = OUTPUT_DIR / f"ocr_{ocr_id}_result.docx"
-    doc_out = docx.Document()
-    doc_out.add_heading(f"OCR: {file.filename}", level=1)
-    for para in extracted_text.split("\n\n"):
-        cleaned = para.strip()
-        if cleaned:
-            doc_out.add_paragraph(cleaned)
-    doc_out.save(str(out_docx_path))
-
-    # Convert DOCX to PDF
-    pdf_output_name = f"ocr_{ocr_id}_result.pdf"
-    pdf_output_path = None
-    try:
-        pdf_output_path = convert_docx_to_pdf_libreoffice(out_docx_path, OUTPUT_DIR)
-        # Rename to standard name
-        final_pdf = OUTPUT_DIR / pdf_output_name
-        if pdf_output_path != final_pdf:
-            pdf_output_path.rename(final_pdf)
-        pdf_output_path = final_pdf
-    except Exception as e:
-        app_logger.warning(f"OCR PDF conversion failed: {e}, falling back to DOCX")
-        pdf_output_path = None
-
-    # Cleanup input
-    try:
-        input_path.unlink()
-    except:
-        pass
-
-    download_file = pdf_output_path if pdf_output_path and pdf_output_path.exists() else out_docx_path
-    download_name = Path(file.filename).stem + "_ocr.pdf" if pdf_output_path and pdf_output_path.exists() else Path(file.filename).stem + "_ocr.docx"
-
-    return {
-        "ocr_id": ocr_id,
-        "filename": file.filename,
-        "text": extracted_text,
-        "char_count": len(extracted_text),
-        "download_url": f"/api/ocr/{ocr_id}/download",
-        "download_name": download_name
-    }
+            input_path.write_bytes(content)
+            if ext == '.docx':
+                segments = extract_docx_segments(input_path, tag_inline=False)
+                extracted_text = '\n\n'.join(seg['text'] for seg in segments)
+            elif ext == '.pdf':
+                pages = []
+                with pdfplumber.open(str(input_path)) as pdf:
+                    for index, page in enumerate(pdf.pages):
+                        text = (_ocr_pdf_page(input_path, index + 1, tess_lang)
+                                if _page_requires_ocr(page) else page.extract_text() or '')
+                        if text.strip():
+                            pages.append(f'--- Pagina {index + 1} ---\n\n{text.strip()}')
+                extracted_text = '\n\n'.join(pages)
+            else:
+                if not TESSERACT_AVAILABLE:
+                    raise HTTPException(503, 'Tesseract OCR nu este disponibil pe server.')
+                with Image.open(str(input_path)) as img:
+                    extracted_text = pytesseract.image_to_string(img, lang=tess_lang).strip()
+            if not extracted_text.strip():
+                raise HTTPException(400, 'Nu a fost identificat text în document.')
+            result = docx.Document()
+            result.add_heading(f'OCR: {file.filename}', level=1)
+            for paragraph in extracted_text.split('\n\n'):
+                if paragraph.strip():
+                    result.add_paragraph(paragraph.strip())
+            result.save(str(out_docx_path))
+            pdf_ready = False
+            try:
+                converted = convert_docx_to_pdf_libreoffice(out_docx_path, OUTPUT_DIR)
+                if converted != out_pdf_path:
+                    converted.rename(out_pdf_path)
+                pdf_ready = out_pdf_path.exists()
+            except Exception as exc:
+                app_logger.warning(f'OCR PDF conversion failed: {exc}, falling back to DOCX')
+            return {'ocr_id': ocr_id, 'filename': file.filename,
+                    'text': extracted_text, 'char_count': len(extracted_text),
+                    'download_url': f'/api/ocr/{ocr_id}/download',
+                    'download_name': Path(file.filename or 'document').stem + ('_ocr.pdf' if pdf_ready else '_ocr.docx')}
+        except HTTPException:
+            out_docx_path.unlink(missing_ok=True)
+            out_pdf_path.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            out_docx_path.unlink(missing_ok=True)
+            out_pdf_path.unlink(missing_ok=True)
+            raise HTTPException(500, f'Eroare OCR: {exc}') from exc
+        finally:
+            input_path.unlink(missing_ok=True)
 
 @app.get("/api/ocr/{ocr_id}/download")
 async def api_ocr_download(ocr_id: str):
@@ -2568,6 +2795,7 @@ async def api_system_info():
                           (JobStatus.QUEUED, JobStatus.EXTRACTING, JobStatus.CHUNKING,
                            JobStatus.TRANSLATING, JobStatus.ASSEMBLING)),
         "ollama_url": DEFAULT_OLLAMA_URL,
+        "libretranslate_url": DEFAULT_LIBRETRANSLATE_URL,
         "installed_languages": _get_installed_languages()
     }
 
@@ -2627,7 +2855,7 @@ async def api_network_diagnostics():
         # Ollama API test
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"http://{host}:{ollama_port}/api/version",
+                async with session.get(f"http://{host}:{ollama_port}/api/version", allow_redirects=False,
                                        timeout=aiohttp.ClientTimeout(total=3)) as resp:
                     if resp.status == 200:
                         test["ollama"] = True
@@ -2668,39 +2896,56 @@ async def api_sse(request: Request, job_id: str):
 # Scheduled Cleanup (daily at midnight)
 # ============================================================
 
+def _cleanup_files(older_than=None):
+    deleted = skipped = 0
+    for directory in (UPLOAD_DIR, OUTPUT_DIR):
+        if not directory.exists():
+            continue
+        for path in directory.iterdir():
+            if not path.is_file():
+                continue
+            if is_file_active(path):
+                skipped += 1
+                continue
+            try:
+                if older_than is not None and path.stat().st_mtime > older_than:
+                    continue
+                path.unlink(missing_ok=True)
+                deleted += 1
+            except OSError as exc:
+                app_logger.error(f"Cleanup failed for {path.name}: {exc}")
+    return deleted, skipped
+
+
 def cleanup_old_files():
-    """Delete all files from uploads/ and outputs/ directories."""
-    deleted = 0
-    for d in [UPLOAD_DIR, OUTPUT_DIR]:
-        if d.exists():
-            for f in d.iterdir():
-                if f.is_file():
-                    try:
-                        f.unlink()
-                        deleted += 1
-                    except Exception as e:
-                        app_logger.error(f"Cleanup failed for {f}: {e}")
-    app_logger.info(f"Scheduled cleanup: {deleted} files deleted")
+    """Expire old inactive files, never source files needed by current work."""
+    hours = max(1.0, float(os.environ.get("FILE_RETENTION_HOURS", "24")))
+    deleted, skipped = _cleanup_files(older_than=time.time() - hours * 3600)
+    app_logger.info(f"Scheduled cleanup: {deleted} expired files deleted; {skipped} active files retained")
     return deleted
 
+
+_cleanup_task = None
+
+
 def schedule_daily_cleanup():
-    """Schedule cleanup to run daily at midnight."""
-    def run_cleanup():
+    """Schedule retention on the API loop so cleanup cannot race job dispatch."""
+    global _cleanup_task
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # Direct script startup reaches the ASGI startup hook after this call.
+        return
+    if _cleanup_task is not None and not _cleanup_task.done():
+        return
+    async def run_cleanup():
         while True:
             now = datetime.now()
-            midnight = (now + timedelta(days=1)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            wait_seconds = (midnight - now).total_seconds()
-            app_logger.info(
-                f"Next cleanup scheduled in {wait_seconds:.0f}s (at midnight)"
-            )
-            time.sleep(wait_seconds)
+            midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            await asyncio.sleep((midnight - now).total_seconds())
             cleanup_old_files()
-
-    t = threading.Thread(target=run_cleanup, daemon=True)
-    t.start()
-    app_logger.info("Daily cleanup scheduler started (runs at midnight)")
+    _cleanup_task = asyncio.create_task(run_cleanup())
+    app_logger.info("Daily retention cleanup started (inactive files only)")
 
 # ============================================================
 # Main

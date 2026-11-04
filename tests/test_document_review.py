@@ -5,6 +5,7 @@ Network calls are replaced at the engine boundary; DOCX extraction, application,
 upload validation, download paths and job state transitions use real code.
 """
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -49,6 +50,9 @@ class ReachableSession:
 
 class DocumentReviewTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        engine_config = patch.dict(os.environ, {"TRANSLATOR_ALLOWED_ENGINE_URLS": "http://unused"})
+        engine_config.start()
+        self.addCleanup(engine_config.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -102,7 +106,9 @@ class DocumentReviewTests(unittest.IsolatedAsyncioTestCase):
         table.cell(0, 1).paragraphs[0].runs[0].bold = True
         job, response = await self.verify(original, translated)
         self.assertTrue(response["mismatch"])
-        self.assertEqual(response["total"], 2)
+        self.assertEqual(response["total"], 3)  # body, matched cell, header
+        self.assertEqual(job.source_segments[2], "")  # unmatched translated cell
+        self.assertEqual(job.source_segments[3], "SOURCE HEADER")
         self.reviewed(job)
         revised, applied = await self.apply(job, indices=[1], edits={"1": "Celulă corectată manual"})
         self.assertEqual(applied["applied"], 1)

@@ -9,7 +9,8 @@
 #   podman build -t traducator-offline --build-arg LANGUAGES=en,ro,fr,de,es .
 #
 # Export: podman save traducator-offline -o traducator-offline.tar
-# Run:    podman run -d -p 8080:8080 traducator-offline
+# Run: use traducator_manager.bat, or mount a shared-password secret and set
+# TRANSLATOR_PASSWORD_FILE before publishing port 8080 (see README).
 # ============================================================
 
 FROM python:3.11-slim
@@ -46,6 +47,7 @@ RUN pip install --no-cache-dir \
     uvicorn[standard] \
     python-multipart \
     python-docx \
+    docxcompose==2.2.0 \
     pdfplumber \
     aiohttp \
     psutil \
@@ -56,14 +58,16 @@ RUN pip install --no-cache-dir \
     Pillow
 
 # -- LibreTranslate + Argos Translate --
-RUN pip install --no-cache-dir libretranslate
+RUN pip install --no-cache-dir libretranslate==1.9.6
 
 # -- Download language models based on LANGUAGES build arg --
-COPY install_languages.py /tmp/install_languages.py
-RUN python3 /tmp/install_languages.py "${LANGUAGES}" && rm /tmp/install_languages.py
+COPY install_languages.py /opt/translator/install_languages.py
+RUN python3 /opt/translator/install_languages.py "${LANGUAGES}" \
+    && python3 /opt/translator/install_languages.py --verify-only
 
 # -- Copy application --
-COPY app/ /app/
+COPY app/*.py /app/
+COPY app/static/ /app/static/
 
 # -- Create working directories --
 RUN mkdir -p /app/uploads /app/outputs
@@ -84,8 +88,8 @@ ENV INSTALLED_LANGUAGES=${LANGUAGES}
 EXPOSE 8080
 
 # -- Health check --
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/api/status || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl --fail --silent --show-error --max-time 8 http://127.0.0.1:${PORT}/healthz || exit 1
 
 # -- Entrypoint --
 ENTRYPOINT ["/entrypoint.sh"]
