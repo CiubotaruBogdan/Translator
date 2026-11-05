@@ -729,7 +729,7 @@ select.form-control{appearance:none;background-image:url("data:image/svg+xml,%3C
         <div class="card-body">
           <div class="form-group">
             <label class="form-label">URL Ollama</label>
-            <input class="form-control" id="ollamaUrl" value="" placeholder="Se detectează automat...">
+            <input class="form-control" id="ollamaUrl" value="" placeholder="Se detectează automat..." onchange="refreshModels()">
             <div class="form-hint">Adresa serverului Ollama. Modificați dacă rulează pe alt port sau altă mașină.</div>
           </div>
           <div style="display:flex;gap:8px">
@@ -1012,6 +1012,9 @@ let activeJobs = {};  // jobId -> {sse, data}
 let ws = null;
 let wsPingTimer = null;
 let wsReconnectTimer = null;
+let ollamaStatusTimer = null;
+let ollamaStatusRequestId = 0;
+let serverDefaultModel = '';
 let selectedFiles = [];  // Array of File objects
 let uploadsInProgress = false;
 let jobsPageSSE = {};   // jobId -> {sse, data} for jobs page live tracking
@@ -1061,11 +1064,16 @@ function init() {
 
   // Fetch server info: Ollama URL + installed languages
   fetch('/api/system-info').then(r => r.json()).then(info => {
-    // Set Ollama URL if not saved by user
-    if (info.ollama_url && !localStorage.getItem('ollamaUrl')) {
+    // Server startup defaults apply only when the browser has no saved choice.
+    if (info.ollama_url && !$('ollamaUrl').value) {
       $('ollamaUrl').value = info.ollama_url;
-      refreshModels();
     }
+    serverDefaultModel = info.default_model || '';
+    if (!localStorage.getItem('engine') && ['ollama', 'libretranslate'].includes(info.default_engine)) {
+      $('engineSelect').value = info.default_engine;
+      onEngineChange();
+    }
+    refreshModels();
     if (info.libretranslate_url && !localStorage.getItem('libreUrl')) {
       $('libreUrl').value = info.libretranslate_url;
     }
@@ -1114,6 +1122,7 @@ function init() {
   updateTTEngineBadge();
 
   connectWS();
+  startOllamaStatusPolling();
   loadJobs();
   refreshModels();
   updateNotifStatus();
@@ -1130,13 +1139,8 @@ function onEngineChange() {
   $('libreSettingsCard').style.display = isOllama ? 'none' : '';
   $('ollamaPerfCard').style.display = isOllama ? '' : 'none';
   $('librePerfCard').style.display = isOllama ? 'none' : '';
-  // Update sidebar status text
-  if (isOllama) {
-    // Will be updated by WS
-  } else {
-    $('ollamaStatusText').textContent = 'Motor: LibreTranslate';
-    $('ollamaStatusDot').style.background = 'var(--primary)';
-  }
+  // Both sidebar indicators report service availability independently of the
+  // selected translation engine (Ollama may still be used for reviews).
   // Update language dropdowns based on engine
   if (isOllama) {
     // Ollama can translate any language
@@ -1578,6 +1582,7 @@ function getReviewModel() {
 
 async function refreshModels() {
   const requestId = ++modelsRequestId;
+  const statusRequestId = ++ollamaStatusRequestId;
   const url = $('ollamaUrl').value.trim();
   const badge = $('modelsStatusBadge');
   // If URL is empty, use server default (auto-detected)
@@ -1587,9 +1592,10 @@ async function refreshModels() {
 
   try {
     const resp = await fetch(`/api/models${queryUrl}`);
-    if (!resp.ok) throw new Error('Modelele nu au putut fi încărcate');
     const data = await resp.json();
-    if (requestId !== modelsRequestId) return;
+    if (!resp.ok) throw new Error(data.detail || 'Modelele nu au putut fi încărcate');
+    if (requestId !== modelsRequestId || url !== $('ollamaUrl').value.trim()) return;
+    if (statusRequestId === ollamaStatusRequestId) renderOllamaStatus(data, url);
     availableReviewModels = data.connected ? (data.models || []) : [];
     syncReviewModelControls();
 
@@ -1604,8 +1610,12 @@ async function refreshModels() {
       badge.innerHTML = `<span class="badge-dot"></span> ${data.models.length} modele`;
 
       // Restore saved model
-      const saved = localStorage.getItem('selectedModel');
-      if (saved && data.models.some(m => m.name === saved)) sel.value = saved;
+      const saved = localStorage.getItem('selectedModel') || serverDefaultModel;
+      if (saved) {
+        const match = data.models.find(m => m.name === saved || m.name === saved + ':latest');
+        if (!match) sel.add(new Option(saved + ' (neinstalat pe acest server)', saved));
+        sel.value = match ? match.name : saved;
+      }
 
       // Render table
       $('settingsModelsList').innerHTML = `<table class="table-simple">
@@ -1627,10 +1637,12 @@ async function refreshModels() {
       $('settingsModelsList').innerHTML = '<div style="color:var(--red);font-size:13px;margin-top:8px">Nu se poate conecta la Ollama. Verificați dacă serverul rulează.</div>';
     }
   } catch (e) {
-    if (requestId !== modelsRequestId) return;
+    if (requestId !== modelsRequestId || url !== $('ollamaUrl').value.trim()) return;
+    if (statusRequestId === ollamaStatusRequestId) renderOllamaStatus(null, url, e.message);
     availableReviewModels = [];
     syncReviewModelControls();
     $('modelSelect').innerHTML = '<option value="">Eroare la încărcare</option>';
+    $('settingsModelsList').textContent = e.message;
     badge.className = 'badge red';
     badge.innerHTML = '<span class="badge-dot"></span> Eroare';
   }
@@ -2295,10 +2307,16 @@ function connectWS() {
 window.addEventListener('pagehide', () => {
   clearInterval(wsPingTimer);
   clearTimeout(wsReconnectTimer);
+  clearInterval(ollamaStatusTimer);
+  ollamaStatusTimer = null;
   if (ws) { ws.onclose = null; ws.close(); }
 });
 window.addEventListener('pageshow', event => {
-  if (event.persisted) connectWS();
+  if (event.persisted) {
+    connectWS();
+    startOllamaStatusPolling();
+    refreshOllamaStatus();
+  }
 });
 
 function updateDashboard(d) {
@@ -2348,37 +2366,8 @@ function updateDashboard(d) {
     ltTxt.textContent = 'LibreTranslate: Offline';
   }
 
-  // Ollama status (sidebar + dashboard)
-  const ollama = d.ollama || {};
-  const dot = $('ollamaStatusDot');
-  const txt = $('ollamaStatusText');
-  const dashStatus = $('dashOllamaStatus');
-  if (ollama.connected) {
-    dot.style.background = 'var(--green)';
-    txt.textContent = 'Ollama: Online (' + (ollama.models||[]).length + ' modele)';
-    dashStatus.className = 'badge green';
-    dashStatus.innerHTML = '<span class="badge-dot"></span> Conectat';
-    // Sync ollamaUrl field if empty or default
-    const urlField = $('ollamaUrl');
-    if (!urlField.value || urlField.value === 'http://localhost:11434') {
-      fetch('/api/system-info').then(r => r.json()).then(info => {
-        if (info.ollama_url) urlField.value = info.ollama_url;
-      }).catch(() => {});
-    }
-  } else {
-    dot.style.background = 'var(--red)';
-    txt.textContent = 'Ollama: Offline';
-    dashStatus.className = 'badge red';
-    dashStatus.innerHTML = '<span class="badge-dot"></span> Deconectat';
-  }
-
-  if (ollama.models && ollama.models.length) {
-    $('dashModelsList').innerHTML = `<table class="table-simple"><thead><tr><th>Model</th><th>Dimensiune</th><th>Familie</th></tr></thead><tbody>` +
-      ollama.models.map(m => `<tr><td><strong>${escRev(m.name)}</strong></td><td>${fmtBytes(m.size)}</td><td>${escRev((m.details||{}).family || '-')}</td></tr>`).join('') +
-      '</tbody></table>';
-  } else {
-    $('dashModelsList').innerHTML = '<div style="color:var(--text3);font-size:13px">Niciun model instalat</div>';
-  }
+  // Ollama status/models are probed at the selected settings URL. A dashboard
+  // push describes the server default and must not replace that result.
 
   const clients = d.clients_detail || [];
   $('dashClientsCount').textContent = clients.length;
@@ -2411,6 +2400,7 @@ function fmtDuration(s) {
 // ============================================================
 function saveSettingsManual() {
   saveSettings();
+  refreshModels();
   toast('Setările au fost salvate cu succes!', 'success');
 }
 
@@ -2546,21 +2536,60 @@ function toggleTheme() {
   localStorage.setItem('theme', dark ? 'light' : 'dark');
 }
 
-async function testConnection() {
+function renderOllamaStatus(data, url, error = '') {
+  const connected = data?.connected === true;
+  const models = connected && Array.isArray(data.models) ? data.models : [];
+  const dot = $('ollamaStatusDot'), text = $('ollamaStatusText');
+  const badge = $('dashOllamaStatus');
+  const detail = (url || 'Adresa implicită a serverului') + (error ? '\n' + error : '');
+  dot.style.background = error ? 'var(--amber)' : (connected ? 'var(--green)' : 'var(--red)');
+  text.textContent = error ? 'Ollama: Verificare eșuată' : (connected
+    ? `Ollama: Online (${models.length} modele)` : 'Ollama: Offline');
+  text.title = detail;
+  badge.className = 'badge ' + (error ? 'amber' : (connected ? 'green' : 'red'));
+  badge.innerHTML = '<span class="badge-dot"></span> ' + (error ? 'Verificare eșuată' : (connected ? 'Conectat' : 'Deconectat'));
+  badge.title = detail;
+  if (models.length) {
+    $('dashModelsList').innerHTML = '<table class="table-simple"><thead><tr><th>Model</th><th>Dimensiune</th><th>Familie</th></tr></thead><tbody>' +
+      models.map(m => `<tr><td><strong>${escRev(m.name)}</strong></td><td>${fmtBytes(m.size)}</td><td>${escRev((m.details||{}).family || '-')}</td></tr>`).join('') + '</tbody></table>';
+  } else {
+    $('dashModelsList').textContent = connected ? 'Niciun model instalat' : 'Lista modelelor nu este disponibilă';
+  }
+}
+
+async function refreshOllamaStatus() {
+  const requestId = ++ollamaStatusRequestId;
   const url = $('ollamaUrl').value.trim();
   const queryUrl = url ? `?url=${encodeURIComponent(url)}` : '';
   try {
     const resp = await fetch(`/api/ollama${queryUrl}`);
     const data = await resp.json();
-    if (!resp.ok) throw new Error(data.detail || resp.status);
-    if (data.connected) {
-      toast(`Conectat! ${data.models.length} modele găsite.`, 'success');
-      refreshModels();
-    } else {
-      toast('Nu se poate conecta: ' + (data.error || 'unknown'), 'error');
-    }
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    if (requestId !== ollamaStatusRequestId || url !== $('ollamaUrl').value.trim()) return null;
+    renderOllamaStatus(data, url);
+    return data;
   } catch (e) {
-    toast('Eroare: ' + e.message, 'error');
+    if (requestId !== ollamaStatusRequestId || url !== $('ollamaUrl').value.trim()) return null;
+    renderOllamaStatus(null, url, e.message);
+    return {connected: false, error: e.message};
+  }
+}
+
+function startOllamaStatusPolling() {
+  clearInterval(ollamaStatusTimer);
+  ollamaStatusTimer = setInterval(() => {
+    if (!document.hidden) refreshOllamaStatus();
+  }, 10000);
+}
+
+async function testConnection() {
+  const data = await refreshOllamaStatus();
+  if (!data) return;
+  if (data.connected) {
+    toast(`Conectat! ${(data.models || []).length} modele găsite.`, 'success');
+    refreshModels();
+  } else {
+    toast('Nu se poate conecta: ' + (data.error || 'Ollama nu răspunde la adresa configurată'), 'error');
   }
 }
 

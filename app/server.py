@@ -74,7 +74,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # OLLAMA_URL can be 'auto' (set by entrypoint.sh after detection) or explicit URL
-_ollama_env = os.environ.get("OLLAMA_URL", "http://host.containers.internal:11434")
+_ollama_env = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 DEFAULT_OLLAMA_URL = _ollama_env if _ollama_env != "auto" else "http://host.containers.internal:11434"
 DEFAULT_LIBRETRANSLATE_URL = os.environ.get("LIBRETRANSLATE_URL", "http://127.0.0.1:5000")
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "translategemma")
@@ -555,6 +555,10 @@ async def get_ollama_status(url=None):
                                    timeout=aiohttp.ClientTimeout(total=5), allow_redirects=False) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    if (not isinstance(data, dict) or not isinstance(data.get("models"), list)
+                            or not all(isinstance(m, dict) and isinstance(m.get("name"), str)
+                                       for m in data["models"])):
+                        return {"connected": False, "models": []}
                     models = [{"name": m.get("name",""), "size": m.get("size",0),
                                "modified_at": m.get("modified_at",""),
                                "details": m.get("details",{})}
@@ -2796,6 +2800,8 @@ async def api_system_info():
                            JobStatus.TRANSLATING, JobStatus.ASSEMBLING)),
         "ollama_url": DEFAULT_OLLAMA_URL,
         "libretranslate_url": DEFAULT_LIBRETRANSLATE_URL,
+        "default_engine": DEFAULT_ENGINE,
+        "default_model": DEFAULT_MODEL,
         "installed_languages": _get_installed_languages()
     }
 

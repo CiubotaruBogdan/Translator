@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import unittest
-from urllib.parse import urlsplit, unquote
+from urllib.parse import urlsplit, unquote, parse_qs
 
 from playwright.sync_api import sync_playwright
 
@@ -51,7 +51,7 @@ def fixtures(path):
                 'cpu_count': 4, 'ram_total_gb': 8, 'server_start': '2026-01-01T00:00:00',
                 'uptime_seconds': 1, 'upload_dir': '/tmp/upload', 'output_dir': '/tmp/output',
                 'total_jobs': 0, 'active_jobs': 0}
-    if path == '/api/models':
+    if path in ('/api/models', '/api/ollama'):
         return {'connected': True, 'models': [{'name': 'model:latest', 'size': 1000, 'details': {}}]}
     if path == '/api/jobs':
         return {'jobs': []}
@@ -91,9 +91,11 @@ class FrontendRegressions(unittest.TestCase):
         self.page.on('pageerror', lambda error: self.errors.append(str(error)))
         self.overrides = {}
         self.requests = []
+        self.request_urls = []
         def route(request):
             path = urlsplit(request.request.url).path
             self.requests.append((request.request.method, path))
+            self.request_urls.append(request.request.url)
             if path in self.overrides:
                 request.fulfill(json=self.overrides[path])
             elif path.startswith('/api/'):
@@ -171,6 +173,78 @@ class FrontendRegressions(unittest.TestCase):
         self.assertIn(payload, self.page.locator('#dashGpuModels').inner_text())
         self.assertEqual(self.page.locator('#settingsModelsList img, #dashModelsList img, #dashGpuModels img').count(), 0)
         self.assertFalse(self.page.evaluate('window.metadataExecuted === true'))
+
+    def test_ollama_sidebar_uses_selected_endpoint_despite_dashboard_updates(self):
+        selected = 'http://selected-ollama:11434'
+        self.context.add_init_script("localStorage.setItem('ollamaUrl', " + json.dumps(selected) + ");")
+        self.open()
+        self.assertEqual(self.page.locator('#ollamaStatusText').inner_text(), 'Ollama: Online (1 modele)')
+        self.page.evaluate("updateDashboard({ollama:{connected:false, models:[]}})")
+        self.assertIn('Online', self.page.locator('#ollamaStatusText').inner_text())
+        self.assertEqual(self.page.locator('#ollamaUrl').input_value(), selected)
+        self.overrides['/api/ollama'] = {'connected': False, 'models': []}
+        self.page.evaluate('testConnection()')
+        self.assertEqual(self.page.locator('#ollamaStatusText').inner_text(), 'Ollama: Offline')
+        self.page.evaluate("updateDashboard({ollama:{connected:true, models:[{name:'different-default'}]}})")
+        self.assertEqual(self.page.locator('#ollamaStatusText').inner_text(), 'Ollama: Offline')
+        queried = [parse_qs(urlsplit(url).query)['url'][0] for url in self.request_urls
+                   if urlsplit(url).path == '/api/ollama']
+        self.assertEqual(queried, [selected])
+        self.assertEqual(self.page.locator('#ollamaStatusText').get_attribute('title'), selected)
+
+    def test_ollama_online_without_models_is_independent_of_engine_selection(self):
+        self.overrides['/api/models'] = {'connected': True, 'models': []}
+        self.open()
+        self.assertEqual(self.page.locator('#ollamaStatusText').inner_text(), 'Ollama: Online (0 modele)')
+        self.page.evaluate("$('engineSelect').value='libretranslate'; onEngineChange()")
+        self.assertEqual(self.page.locator('#ollamaStatusText').inner_text(), 'Ollama: Online (0 modele)')
+        self.overrides['/api/ollama'] = {'connected': False, 'models': []}
+        self.page.evaluate('refreshOllamaStatus()')
+        self.assertEqual(self.page.locator('#ollamaStatusText').inner_text(), 'Ollama: Offline')
+
+    def test_ollama_status_ignores_stale_request_and_clears_status_on_api_error(self):
+        self.open()
+        self.page.evaluate("""() => {
+            const originalFetch = window.fetch;
+            window.fetch = (url, options) => url.startsWith('/api/ollama')
+                ? new Promise(resolve => window.finishOldProbe = () => resolve(new Response(JSON.stringify({connected:true, models:[]}))))
+                : originalFetch(url, options);
+            window.oldProbe = refreshOllamaStatus();
+            $('ollamaUrl').value = 'http://new-ollama:11434';
+            window.fetch = originalFetch;
+        }""")
+        self.overrides['/api/ollama'] = {'connected': False, 'models': []}
+        self.page.evaluate('refreshOllamaStatus()')
+        self.page.evaluate('finishOldProbe(); oldProbe')
+        self.assertEqual(self.page.locator('#ollamaStatusText').inner_text(), 'Ollama: Offline')
+        self.page.evaluate("""async () => {
+            window.fetch = async () => new Response(JSON.stringify({detail:'Motor nepermis'}), {status:400});
+            await refreshOllamaStatus();
+        }""")
+        self.assertEqual(self.page.locator('#ollamaStatusText').inner_text(), 'Ollama: Verificare eșuată')
+        self.assertIn('Motor nepermis', self.page.locator('#ollamaStatusText').get_attribute('title'))
+        self.assertNotIn('model:latest', self.page.locator('#dashModelsList').inner_text())
+        self.page.evaluate('refreshModels()')
+        self.assertEqual(self.page.locator('#settingsModelsList').inner_text(), 'Motor nepermis')
+
+    def test_fresh_browser_uses_startup_engine_and_model_defaults(self):
+        self.overrides['/api/system-info'] = {**fixtures('/api/system-info'),
+            'default_engine': 'libretranslate', 'default_model': 'configured-model'}
+        self.overrides['/api/models'] = {'connected': True, 'models': [
+            {'name':'first-model', 'size':1}, {'name':'configured-model:latest', 'size':1}]}
+        self.open()
+        self.assertEqual(self.page.locator('#engineSelect').input_value(), 'libretranslate')
+        self.assertEqual(self.page.locator('#modelSelect').input_value(), 'configured-model:latest')
+
+    def test_saved_browser_engine_and_model_override_startup_defaults(self):
+        self.context.add_init_script("localStorage.setItem('engine', 'ollama'); localStorage.setItem('selectedModel', 'saved-model');")
+        self.overrides['/api/system-info'] = {**fixtures('/api/system-info'),
+            'default_engine': 'libretranslate', 'default_model': 'configured-model'}
+        self.overrides['/api/models'] = {'connected': True, 'models': [
+            {'name':'saved-model', 'size':1}, {'name':'configured-model:latest', 'size':1}]}
+        self.open()
+        self.assertEqual(self.page.locator('#engineSelect').input_value(), 'ollama')
+        self.assertEqual(self.page.locator('#modelSelect').input_value(), 'saved-model')
 
     def test_ocr_and_text_copy_fallback_on_http(self):
         self.open()

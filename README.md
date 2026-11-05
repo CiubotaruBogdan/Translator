@@ -1,6 +1,6 @@
 # Traducător Offline
 
-O soluție completă de traducere a documentelor, containerizată, proiectată pentru a funcționa 100% offline pe o stație Windows 11. Aplicația oferă o interfață web accesibilă în rețeaua locală și suportă multiple motoare de traducere și formate de documente, cu accent pe păstrarea formatării.
+O aplicație de traducere a documentelor care poate rula direct cu Python sau într-un container pe Windows. După instalarea dependențelor și a modelelor, poate funcționa offline. Oferă o interfață web accesibilă în rețeaua locală și suportă multiple motoare de traducere și formate de documente, cu accent pe păstrarea formatării.
 
 ## Acces și pornire
 
@@ -13,6 +13,61 @@ Pentru pornire manuală sau dezvoltare, configurează **`TRANSLATOR_PASSWORD_FIL
 Adresele motoarelor permise sunt cele configurate la pornire prin `OLLAMA_URL` și `LIBRETRANSLATE_URL`. Pentru destinații suplimentare, administratorul setează **`TRANSLATOR_ALLOWED_ENGINE_URLS`** ca listă de origini separate prin virgulă, de exemplu `http://server-llm:11434,http://server-traduceri:5000`. Nu sunt acceptate căi, parametri, fragmente, credențiale în URL sau redirecționări. Interfața nu poate extinde această listă.
 
 Endpoint-ul public **`/healthz`** returnează doar disponibilitatea minimă: HTTP 200 când accesul și motorul selectat sunt pregătite, respectiv 503 când nu sunt. Detaliile din `/api/status` necesită autentificare.
+
+## Inițializare și pornire directă pe Windows, cu Python
+
+Pentru rularea fișierului **`app/server.py`** pe calculatorul tău, folosește **`initializare.bat`** la prima configurare și **`pornire.bat`** la pornirile următoare. Acestea funcționează din folderul repository-ului, fără drepturi de administrator. `initializare.py` este asistentul de configurare; `app/manager_client.py` este doar utilitarul managerului Podman și nu pornește aplicația.
+
+### 1. Pregătește Python și motorul de traducere
+
+Instalează Python (recomandat **3.11**, cu Python Launcher), apoi deschide un terminal în folderul aplicației. Pentru o instalare separată de celelalte programe Python:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install fastapi "uvicorn[standard]" python-multipart python-docx docxcompose==2.2.0 pdfplumber aiohttp psutil websockets pdf2docx pdf2image pytesseract Pillow
+```
+
+Pentru **Ollama**, instalează și pornește Ollama pe calculatorul care va executa traducerile. Descarcă modelul ales cât timp ai internet, de exemplu:
+
+```powershell
+ollama pull translategemma
+```
+
+Adresa pentru Ollama pe același calculator este `http://127.0.0.1:11434`. Dacă alegi **LibreTranslate**, acesta trebuie să ruleze separat la adresa configurată, cu limbile necesare instalate. Pornirea `server.py` nu pornește niciunul dintre aceste motoare. Verificarea traducerilor cu LLM necesită Ollama chiar dacă traducerea folosește LibreTranslate.
+
+Pentru OCR instalează și **Tesseract** (inclusiv limbile OCR dorite) și **Poppler**, cu executabilele în `PATH`. Pentru export DOCX → PDF instalează **LibreOffice**, cu comanda `libreoffice` sau `soffice` disponibilă în `PATH`. Aceste programe sunt suplimentare pachetelor Python; inițializarea nu le instalează și nu descarcă modele.
+
+### 2. Rulează inițializarea interactivă
+
+Dublu-click pe **`initializare.bat`**. Asistentul cere parola comună de minimum 12 caractere, cu introducere mascată și confirmare, apoi motorul, adresele, modelul, portul și celelalte setări. Apasă Enter pentru a accepta valorile propuse. La reconfigurare poți păstra parola existentă fără să fie afișată.
+
+Setările sunt salvate în **Environment Variables → User variables**, pentru contul Windows curent, nu în System variables:
+
+| Variabilă | Rol / valoare inițială |
+| --- | --- |
+| `TRANSLATOR_PASSWORD` | Parola comună aleasă interactiv; fără parolă implicită. Utilizatorul de autentificare este fix: `translator`. |
+| `TRANSLATE_ENGINE` | `ollama` sau `libretranslate`; propune `ollama`. |
+| `OLLAMA_URL` | Adresa Ollama: `http://127.0.0.1:11434`. Pentru alt calculator, introdu adresa lui accesibilă serverului. |
+| `OLLAMA_MODEL` | Modelul implicit de traducere: `translategemma`; trebuie să existe în Ollama. |
+| `LIBRETRANSLATE_URL` | Adresa LibreTranslate: `http://127.0.0.1:5000`. |
+| `PORT` | Portul interfeței web: `8080`. |
+| `INSTALLED_LANGUAGES` | Limbile așteptate de la LibreTranslate: `en,ro`. Lista trebuie să corespundă instalării motorului. |
+| `FILE_RETENTION_HOURS` | Retenția fișierelor inactive: `24` de ore. |
+| `TRANSLATOR_ALLOWED_ENGINE_URLS` | Origini suplimentare permise, separate prin virgulă; implicit fără destinații suplimentare. Adresele celor două motoare de mai sus sunt deja permise. |
+
+Adresele trebuie să fie origini HTTP(S), fără `/api`, cale, parametri sau credențiale. Scriptul validează valorile înainte de salvare și nu introduce parola în argumentele comenzilor sau în repository. Aceste variabile configurează pornirea directă pe Windows; nu modifică mediul unui container Podman/Docker deja creat.
+
+**Configurări anterioare:** `TRANSLATOR_PASSWORD_FILE` are prioritate față de parola directă. Asistentul anunță și elimină vechea setare din User variables când salvează parola directă. Dacă această variabilă există în System variables, inițializarea se oprește și indică remedierea; nu modifică variabilele de sistem. Nu trebuie creată o variabilă pentru numele utilizatorului.
+
+### 3. Pornește aplicația
+
+După configurare poți porni aplicația din asistent. Ulterior folosește **`pornire.bat`**: citește variabilele salvate pentru contul tău și pornește `app/server.py` cu același interpretor Python. Folosește prioritar `.venv\Scripts\python.exe`, dacă există, apoi Python Launcher sau `python` din `PATH`.
+
+Deschide **http://localhost:8080** (sau portul ales) și autentifică-te cu utilizatorul **`translator`** și parola configurată. Pentru acces LAN, ceilalți utilizatori folosesc `http://ADRESA-IP-A-CALCULATORULUI:PORT`, cu același utilizator și aceeași parolă; accesul depinde și de regulile Windows Firewall. Păstrează fereastra serverului deschisă.
+
+La schimbarea setărilor, închide serverul curent și pornește-l din nou. `pornire.bat` preia valorile actuale chiar dacă terminalul sau Explorer au moștenit un mediu vechi. Pentru dublu-click direct pe `app/server.py`, Windows trebuie să fi propagat deja noile variabile; dacă mesajul „Acces neconfigurat” persistă, folosește `pornire.bat`.
+
+Indicatorul **Ollama** din stânga verifică adresa Ollama selectată în Setări și rămâne separat de alegerea motorului de traducere. Setările salvate anterior în browser au prioritate față de valorile inițiale ale serverului; dacă ai schimbat adresa în inițializare, actualizeaz-o și în Setări. O conexiune reușită la Ollama nu confirmă că un anumit model a fost descărcat.
 
 ## Arhitectura Sistemului
 
